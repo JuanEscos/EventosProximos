@@ -1,0 +1,11 @@
+folium
+geopy
+lxml
+
+selenium>=4.22
+webdriver-manager>=4.0
+beautifulsoup4>=4.12
+python-dotenv>=1.0
+pandas>=2.2
+numpy>=1.26
+python-dateutil>=2.9
