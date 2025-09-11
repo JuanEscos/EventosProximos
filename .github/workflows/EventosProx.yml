@@ -98,7 +98,7 @@ jobs:
           "
           
           echo "=== EJECUTANDO SCRIPT PYTHON ==="
-          python "./extraerParticipantesEventosProx.py" --module all
+          python "./extraerParticipantesEventosProxBeta.py" --module all
           
           echo "=== ARCHIVOS GENERADOS ==="
           ls -la "$OUT_DIR" || true
