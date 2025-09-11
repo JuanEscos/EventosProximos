@@ -1,0 +1,53 @@
+- name: Run unificado con logging detallado
+  id: run_unificado
+  timeout-minutes: 90
+  shell: bash
+  run: |
+    set -euxo pipefail  # Logging detallado activado
+    mkdir -p "$OUT_DIR"
+    
+    echo "=== VERIFICANDO DEPENDENCIAS ==="
+    python -c "
+    try:
+        import selenium; print('✅ Selenium:', selenium.__version__)
+        import pandas; print('✅ Pandas:', pandas.__version__) 
+        import bs4; print('✅ BeautifulSoup:', bs4.__version__)
+    except ImportError as e:
+        print('❌ Error:', e); exit(1)
+    "
+    
+    echo "=== EJECUTANDO SCRIPT PYTHON ==="
+    python "./extraerParticipantesEventosProx.py" --module all
+    
+    echo "=== ARCHIVOS GENERADOS ==="
+    ls -la "$OUT_DIR" || true
+    
+    echo "=== TAMAÑOS DE ARCHIVOS ==="
+    du -h "$OUT_DIR"/* 2>/dev/null || true
+    
+    echo "=== CONTENIDO DE ARCHIVOS JSON ==="
+    for json_file in "$OUT_DIR"/*.json; do
+      if [ -f "$json_file" ]; then
+        echo "--- $json_file (primeras 3 líneas) ---"
+        head -3 "$json_file" || true
+        echo ""
+      fi
+    done
+    
+    echo "=== VERIFICANDO ARCHIVOS REQUERIDOS ==="
+    required_files=(
+      "01events_*.json"
+      "02competiciones_detalladas_*.json"
+      "participantes_procesado_*.csv" 
+      "participants_completos_final.json"
+    )
+    
+    for pattern in "${required_files[@]}"; do
+      files=(./output/$pattern)
+      if [ -e "${files[0]}" ]; then
+        echo "✅ $pattern: ENCONTRADO ($(ls -la ./output/$pattern))"
+      else
+        echo "❌ $pattern: NO ENCONTRADO"
+        exit 1
+      fi
+    done
