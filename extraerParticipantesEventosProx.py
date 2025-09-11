@@ -207,6 +207,17 @@ def extract_events():
         
         log("Página cargada correctamente")
         
+        # Scroll para cargar todos los eventos
+        log("Haciendo scroll para cargar todos los eventos...")
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        for _ in range(MAX_SCROLLS):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(SCROLL_WAIT_S)
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                break
+            last_height = new_height
+        
         # Obtener HTML de la página
         page_html = driver.page_source
         
@@ -227,13 +238,13 @@ def extract_events():
         events = []
         for i, container in enumerate(event_containers, 1):
             try:
-                # Extraer información básica del evento
+                # Extraer información completa del evento
                 event_data = {}
                 
                 # ID del evento
                 event_id = container.get('id', '')
                 if event_id:
-                    event_data['id'] = event_id
+                    event_data['id'] = event_id.replace('event-card-', '')
                 
                 # Nombre del evento
                 name_elem = container.find('div', class_='font-caption text-lg text-black truncate -mt-1')
@@ -241,20 +252,61 @@ def extract_events():
                     event_data['nombre'] = _clean(name_elem.get_text())
                 
                 # Fechas
-                date_elems = container.find_all('div', class_='text-xs')
-                if date_elems:
-                    event_data['fechas'] = _clean(date_elems[0].get_text())
-                    if len(date_elems) > 1:
-                        event_data['organizacion'] = _clean(date_elems[1].get_text())
+                date_elem = container.find('div', class_='text-xs')
+                if date_elem:
+                    event_data['fechas'] = _clean(date_elem.get_text())
+                
+                # Organización
+                org_elem = container.find_all('div', class_='text-xs')
+                if len(org_elem) > 1:
+                    event_data['organizacion'] = _clean(org_elem[1].get_text())
+                
+                # Club organizador
+                club_elem = container.find('div', class_='text-xs mb-0.5 mt-0.5')
+                if club_elem:
+                    event_data['club'] = _clean(club_elem.get_text())
+                
+                # Lugar - buscar en todos los divs con text-xs
+                location_divs = container.find_all('div', class_='text-xs')
+                for div in location_divs:
+                    text = _clean(div.get_text())
+                    if '/' in text and ('Spain' in text or 'España' in text or any(city in text for city in ['Madrid', 'Barcelona', 'Valencia', 'Sevilla'])):
+                        event_data['lugar'] = text
+                        break
+                
+                # Si no encontramos lugar en los divs, buscar en otro lugar
+                if 'lugar' not in event_data:
+                    lugar_elem = container.find('div', string=re.compile(r'.*/.*'))
+                    if lugar_elem:
+                        event_data['lugar'] = _clean(lugar_elem.get_text())
                 
                 # Enlaces
                 event_data['enlaces'] = {}
+                
+                # Enlace de información
                 info_link = container.find('a', href=lambda x: x and '/info/' in x)
                 if info_link:
                     event_data['enlaces']['info'] = urljoin(BASE, info_link['href'])
                 
-                # Bandera del país (simulada)
-                event_data['pais_bandera'] = '🇪🇸'
+                # Enlace de participantes - BUSCAR CORRECTAMENTE
+                # Buscar todos los enlaces y encontrar el de participantes
+                all_links = container.find_all('a', href=True)
+                for link in all_links:
+                    href = link['href']
+                    if '/participants_list' in href or '/participantes' in href:
+                        event_data['enlaces']['participantes'] = urljoin(BASE, href)
+                        break
+                
+                # Si no encontramos el enlace de participantes, construirlo
+                if 'participantes' not in event_data['enlaces'] and 'id' in event_data:
+                    event_data['enlaces']['participantes'] = f"{BASE}/zone/events/{event_data['id']}/participants_list"
+                
+                # Bandera del país
+                flag_elem = container.find('div', class_='text-md')
+                if flag_elem:
+                    event_data['pais_bandera'] = _clean(flag_elem.get_text())
+                else:
+                    event_data['pais_bandera'] = '🇪🇸'  # Valor por defecto
                 
                 events.append(event_data)
                 log(f"✅ Evento {i} procesado: {event_data.get('nombre', 'Sin nombre')}")
@@ -272,6 +324,18 @@ def extract_events():
             json.dump(events, f, ensure_ascii=False, indent=2)
         
         log(f"✅ Extracción completada. {len(events)} eventos guardados en {output_file}")
+        
+        # Mostrar resumen de lo extraído
+        print(f"\n{'='*80}")
+        print("RESUMEN DE CAMPOS EXTRAÍDOS:")
+        print(f"{'='*80}")
+        for event in events[:3]:  # Mostrar primeros 3 eventos como ejemplo
+            print(f"\nEvento: {event.get('nombre', 'N/A')}")
+            print(f"  Club: {event.get('club', 'No extraído')}")
+            print(f"  Lugar: {event.get('lugar', 'No extraído')}")
+            print(f"  Enlace participantes: {event.get('enlaces', {}).get('participantes', 'No extraído')}")
+        print(f"\n{'='*80}")
+        
         return events
         
     except Exception as e:
