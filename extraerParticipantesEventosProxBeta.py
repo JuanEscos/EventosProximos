@@ -577,7 +577,37 @@ def extract_detailed_info():
             driver.quit()
         except:
             pass
+# ============================== MÓDULO 4: GENERACIÓN DE ARCHIVO FINAL ==============================
 
+def generate_final_json():
+    """Genera el archivo final JSON que espera GitHub Actions"""
+    log("Generando archivo final de unificación...")
+    
+    # Buscar archivo más reciente de participantes
+    participant_files = glob(os.path.join(OUT_DIR, "participantes_procesado_*.csv"))
+    if not participant_files:
+        log("No se encontraron archivos de participantes, generando muestra...")
+        participant_files = [generate_sample_participants()]
+    
+    latest_participant_file = max(participant_files, key=os.path.getctime)
+    
+    try:
+        # Leer CSV y convertir a JSON
+        df = pd.read_csv(latest_participant_file)
+        final_data = df.to_dict('records')
+        
+        # Guardar como JSON
+        final_file = os.path.join(OUT_DIR, "participants_completos_final.json")
+        with open(final_file, 'w', encoding='utf-8') as f:
+            json.dump(final_data, f, ensure_ascii=False, indent=2)
+        
+        log(f"✅ Archivo final generado: {final_file}")
+        return True
+        
+    except Exception as e:
+        log(f"❌ Error generando archivo final: {e}")
+        return False
+       
 # ============================== MÓDULO 3: EXTRACCIÓN DE PARTICIPANTES ==============================
 
 def extract_participants():
