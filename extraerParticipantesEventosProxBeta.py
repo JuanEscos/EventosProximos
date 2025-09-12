@@ -61,6 +61,12 @@ python extraerParticipantesEventosProx.py [--module events|info|participants|all
 FLOWAGILITY SCRAPER COMPLETO - SISTEMA DE EXTRACCIÓN DE DATOS DE COMPETICIONES
 """
 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+FLOWAGILITY SCRAPER COMPLETO - SISTEMA DE EXTRACCIÓN DE DATOS DE COMPETICIONES
+"""
+
 import os
 import sys
 import json
@@ -781,7 +787,7 @@ def extract_participants():
     
     log(f"✅ Cargados {len(events)} eventos detallados desde {latest_detailed_file}")
     
-    driver = _get_driver(headless=False)  # headless=False para debugging
+    driver = _get_driver(headless=False, unique_id="module3")  # headless=False para debugging
     if not driver:
         log("❌ No se pudo crear el driver de Chrome")
         return None
@@ -999,7 +1005,7 @@ def generate_final_json():
         with open(latest_detailed_file, 'r', encoding='utf-8') as f:
             detailed_events = json.load(f)
     
-    # Cargar participantes si existen
+     # Cargar participantes si existen
     all_participants = []
     if participant_files:
         latest_participant_file = max(participant_files, key=os.path.getctime)
