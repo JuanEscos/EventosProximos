@@ -241,7 +241,7 @@ def extract_events():
     
     driver = _get_driver(headless=HEADLESS)
     if not driver:
-        log("❌ No se pudo crear the driver de Chrome")
+        log("❌ No se pudo crear el driver de Chrome")
         return None
     
     try:
