@@ -843,7 +843,7 @@ def generate_final_json():
     log("=== GENERANDO ARCHIVO JSON FINAL ===")
     
     # Buscar archivos más recientes
-    event_files = glob(os.path.join(OUT_DIR, "01events_*.json")
+    event_files = glob(os.path.join(OUT_DIR, "01events_*.json"))
     detailed_files = glob(os.path.join(OUT_DIR, "02competiciones_detalladas_*.json"))
     participant_files = glob(os.path.join(OUT_DIR, "03todos_participantes_*.json"))
     
