@@ -2,69 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 FLOWAGILITY SCRAPER COMPLETO - SISTEMA DE EXTRACCIÓN DE DATOS DE COMPETICIONES
-
-DESCRIPCIÓN DEL PROCESO:
-──────────────────────────────────────────────────────────────────────────────
-
-Este sistema automatizado realiza un proceso completo de extracción, transformación
-y carga (ETL) de datos desde la plataforma FlowAgility.com. El proceso consta de
-4 etapas principales:
-
-1. EXTRACCIÓN DE EVENTOS BÁSICOS:
-   - Login automático en FlowAgility
-   - Navegación a la página de eventos
-   - Scroll completo para cargar todos los eventos
-   - Extracción de campos esenciales: nombre, fechas, organización, club, lugar,
-     enlaces (info y participantes), y bandera del país
-
-2. EXTRACCIÓN DE INFORMACIÓN DETALLADA:
-   - Visita a cada página de información de evento
-   - Preservación de campos originales
-   - Enriquecimiento con información adicional
-   - Mejora de datos de club y lugar si es necesario
-
-3. EXTRACCIÓN DE PARTICIPANTES:
-   - Acceso a páginas de listas de participantes
-   - Extracción de información de competidores
-   - Almacenamiento individual por evento
-   - Consolidación en archivo único
-
-4. GENERACIÓN DE OUTPUT FINAL:
-   - Creación de archivo JSON unificado
-   - Generación de CSV procesado
-   - Metadata completa del proceso
-   - Preparación para GitHub Actions y FTP
-
-CARACTERÍSTICAS PRINCIPALES:
-- Extracción robusta de todos los campos requeridos
-- Manejo automático de cookies y sesión
-- Pausas configurables entre solicitudes
-- Preservación de datos originales
-- Logging detallado del proceso
-- Compatibilidad con GitHub Actions
-
-ARCHIVOS GENERADOS:
-- 01events_YYYY-MM-DD.json          → Eventos básicos
-- 02competiciones_detalladas_YYYY-MM-DD.json → Info enriquecida
-- participantes_<event_id>.json     → Participantes por evento
-- 03todos_participantes_YYYY-MM-DD.json → Todos los participantes
-- participants_completos_final.json → Archivo final unificado
-- participantes_procesado_YYYY-MM-DD.csv → CSV procesado
-
-USO:
-python extraerParticipantesEventosProx.py [--module events|info|participants|all]
-"""
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-FLOWAGILITY SCRAPER COMPLETO - SISTEMA DE EXTRACCIÓN DE DATOS DE COMPETICIONES
-"""
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-FLOWAGILITY SCRAPER COMPLETO - SISTEMA DE EXTRACCIÓN DE DATOS DE COMPETICIONES
 """
 
 import os
@@ -167,59 +104,75 @@ def _clean(s: str) -> str:
 def _parse_event_dates(date_string):
     """Parsear fechas de eventos y calcular días restantes"""
     if not date_string:
-        return None, None, None, None
+        return None, None, None
     
     try:
-        today = datetime.now().date()
-        
-        # Patrones comunes de fechas en eventos
+        # Patrones comunes de fechas
         patterns = [
-            # Sep 5 - 7
-            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d+)\s*-\s*(\d+)',
-            # 05/06/07 Septiembre
-            r'(\d+)[/\-](\d+)[/\-](\d+)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)',
-            # 5 y 6 septiembre
-            r'(\d+)\s+y\s+(\d+)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)',
+            r'(\w{3} \d{1,2}) - (\w{3} \d{1,2})',  # Sep 5 - Sep 7
+            r'(\d{1,2} \w{3}) - (\d{1,2} \w{3})',  # 5 Sep - 7 Sep
+            r'(\d{1,2}/\d{1,2}) - (\d{1,2}/\d{1,2})',  # 05/09 - 07/09
+            r'(\d{1,2} \w{3})',  # 5 Sep (evento de un día)
         ]
+        
+        today = datetime.now().date()
+        start_date = None
+        end_date = None
         
         for pattern in patterns:
             match = re.search(pattern, date_string, re.IGNORECASE)
             if match:
-                if len(match.groups()) == 3:
-                    # Formato: Sep 5 - 7
-                    month_str, start_day, end_day = match.groups()
-                    month_num = _month_to_number(month_str)
-                    if month_num:
-                        start_date = datetime(today.year, month_num, int(start_day)).date()
-                        # Si el evento ya pasó este año, verificar si es del próximo año
-                        if start_date < today:
-                            start_date = datetime(today.year + 1, month_num, int(start_day)).date()
-                        return start_date, None, (start_date - today).days, f"{start_day} {month_str} - {end_day} {month_str}"
+                if len(match.groups()) == 2:
+                    # Rango de fechas
+                    date1_str = match.group(1).strip()
+                    date2_str = match.group(2).strip()
+                    
+                    # Intentar parsear ambas fechas
+                    try:
+                        start_date = parser.parse(f"{date1_str} {today.year}", fuzzy=True).date()
+                        end_date = parser.parse(f"{date2_str} {today.year}", fuzzy=True).date()
+                        
+                        # Si la fecha final es anterior a la inicial, asumir próximo año
+                        if end_date < start_date:
+                            end_date = parser.parse(f"{date2_str} {today.year + 1}", fuzzy=True).date()
+                            
+                    except:
+                        try:
+                            start_date = parser.parse(date1_str, fuzzy=True).date()
+                            end_date = parser.parse(date2_str, fuzzy=True).date()
+                        except:
+                            pass
                 
-                elif len(match.groups()) == 4:
-                    # Formato: 05/06/07 Septiembre
-                    day1, day2, day3, month_str = match.groups()
-                    month_num = _month_to_number(month_str)
-                    if month_num:
-                        start_date = datetime(today.year, month_num, int(day1)).date()
-                        if start_date < today:
-                            start_date = datetime(today.year + 1, month_num, int(day1)).date()
-                        return start_date, None, (start_date - today).days, f"{day1}/{day2}/{day3} {month_str}"
+                elif len(match.groups()) == 1:
+                    # Evento de un día
+                    date_str = match.group(1).strip()
+                    try:
+                        start_date = parser.parse(f"{date_str} {today.year}", fuzzy=True).date()
+                        end_date = start_date
+                    except:
+                        try:
+                            start_date = parser.parse(date_str, fuzzy=True).date()
+                            end_date = start_date
+                        except:
+                            pass
+                
+                if start_date and end_date:
+                    break
         
-        # Si no podemos parsear, devolver valores por defecto
-        return None, None, None, date_string
+        # Calcular días restantes
+        days_until = None
+        if start_date:
+            if start_date >= today:
+                days_until = (start_date - today).days
+            else:
+                # Evento ya pasó
+                days_until = -1
+        
+        return start_date, end_date, days_until
         
     except Exception as e:
         log(f"Error parseando fechas '{date_string}': {e}")
-        return None, None, None, date_string
-
-def _month_to_number(month_str):
-    """Convertir nombre de mes a número"""
-    months = {
-        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-        'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-    }
-    return months.get(month_str.lower()[:3], None)
+        return None, None, None
 
 # ============================== FUNCIONES DE NAVEGACIÓN ==============================
 
@@ -239,7 +192,7 @@ def _get_driver(headless=True, unique_id=""):
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # Directorio de usuario único para evitar conflictos
+    # Directorio único de usuario para evitar conflictos
     if unique_id:
         user_data_dir = f"/tmp/chrome_profile_{unique_id}_{int(time.time())}"
         opts.add_argument(f"--user-data-dir={user_data_dir}")
@@ -487,11 +440,11 @@ def extract_events():
                     event_data['pais_bandera'] = '🇪🇸'  # Valor por defecto
                 
                 # Parsear fechas y calcular días restantes
-                start_date, end_date, dias_restantes, fecha_formateada = _parse_event_dates(event_data.get('fechas', ''))
-                event_data['fecha_inicio'] = start_date.isoformat() if start_date else None
-                event_data['fecha_fin'] = end_date.isoformat() if end_date else None
-                event_data['dias_restantes'] = dias_restantes
-                event_data['fecha_formateada'] = fecha_formateada
+                start_date, end_date, days_until = _parse_event_dates(event_data.get('fechas', ''))
+                if start_date:
+                    event_data['fecha_inicio'] = start_date.isoformat()
+                    event_data['fecha_fin'] = end_date.isoformat() if end_date else start_date.isoformat()
+                    event_data['dias_restantes'] = days_until
                 
                 events.append(event_data)
                 log(f"✅ Evento {i} procesado: {event_data.get('nombre', 'Sin nombre')}")
@@ -573,7 +526,7 @@ def extract_detailed_info():
         for i, event in enumerate(events, 1):
             try:
                 # PRESERVAR CAMPOS ORIGINALES IMPORTANTES
-                preserved_fields = ['id', 'nombre', 'fechas', 'organizacion', 'club', 'lugar', 'enlaces', 'pais_bandera', 'fecha_inicio', 'fecha_fin', 'dias_restantes', 'fecha_formateada']
+                preserved_fields = ['id', 'nombre', 'fechas', 'organizacion', 'club', 'lugar', 'enlaces', 'pais_bandera', 'fecha_inicio', 'fecha_fin', 'dias_restantes']
                 detailed_event = {field: event.get(field, '') for field in preserved_fields}
                 
                 # Inicializar contador de participantes
@@ -844,294 +797,4 @@ def extract_participants():
         # Guardar todos los participantes
         if all_participants:
             today_str = datetime.now().strftime("%Y-%m-%d")
-            output_file = os.path.join(OUT_DIR, f'03todos_participantes_{today_str}.json')
-            
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(all_participants, f, ensure_ascii=False, indent=2)
-            
-            log(f"✅ Total de {len(all_participants)} participantes guardados en {output_file}")
-            log(f"✅ {events_with_participants} eventos con participantes procesados")
-        else:
-            log("⚠️  No se generaron participantes para ningún evento")
-        
-        return all_participants
-        
-    except Exception as e:
-        log(f"❌ Error durante la extracción de participantes: {str(e)}")
-        traceback.print_exc()
-        return None
-    finally:
-        try:
-            driver.quit()
-        except:
-            pass
-
-def _create_sample_participants(participants_url, event):
-    """Crear datos de participantes de ejemplo (para testing)"""
-    sample_data = []
-    
-    # Datos de ejemplo realistas
-    guides = ["Margarita Andujar", "Carlos López", "Ana García", "Javier Martínez", "Laura Rodríguez"]
-    dogs = ["Blackyborij", "Luna", "Rocky", "Bella", "Thor", "Max", "Toby", "Coco", "Daisy", "Buddy"]
-    breeds = ["Spanish Water Dog", "Border Collie", "Pastor Alemán", "Labrador", "Golden Retriever"]
-    clubs = ["La Dama", "Agility Trust", "El Área Jerez", "Club Agility Badalona", "A.D Agility Pozuelo"]
-    
-    # Crear 5-10 participantes de ejemplo por evento
-    num_participants = random.randint(5, 10)
-    
-    for i in range(num_participants):
-        participant = {
-            'participants_url': participants_url,
-            'BinomID': f"binom_{event.get('id', 'unknown')}_{i}",
-            'Dorsal': str(random.randint(100, 999)),
-            'Guía': random.choice(guides),
-            'Perro': random.choice(dogs),
-            'Raza': random.choice(breeds),
-            'Edad': f"{random.randint(2, 12)} años",
-            'Género': random.choice(["Hembra", "Macho"]),
-            'Altura (cm)': f"{random.randint(40, 60)}.0",
-            'Nombre de Pedigree': random.choice(dogs),
-            'País': "Spain",
-            'Licencia': str(random.randint(10000, 99999)),
-            'Club': random.choice(clubs),
-            'Federación': "RSCE",
-            'Equipo': "No disponible",
-            'event_uuid': event.get('id', ''),
-            'event_title': event.get('nombre', 'N/D')
-        }
-        
-        # Añadir información de mangas/días (3 días típicos)
-        for day in range(1, 4):
-            participant[f'Día {day}'] = ["Viernes", "Sábado", "Domingo"][day-1]
-            participant[f'Fecha {day}'] = f"Sep {5 + day}, 2025"
-            participant[f'Mangas {day}'] = f"G{random.randint(1, 3)} / {random.choice(['I', 'L', 'M', 'S'])}"
-        
-        # Días 4-6 vacíos
-        for day in range(4, 7):
-            participant[f'Día {day}'] = ""
-            participant[f'Fecha {day}'] = ""
-            participant[f'Mangas {day}'] = ""
-        
-        sample_data.append(participant)
-    
-    return sample_data
-
-# ============================== MÓDULO 4: GENERACIÓN DE ARCHIVOS FINALES ==============================
-
-def generate_csv_output():
-    """Generar archivo CSV procesado con la estructura requerida"""
-    log("=== GENERANDO ARCHIVO CSV PROCESADO ===")
-    
-    # Buscar archivo de participantes más reciente
-    participant_files = glob(os.path.join(OUT_DIR, "03todos_participantes_*.json"))
-    if not participant_files:
-        log("❌ No se encontraron archivos de participantes")
-        return False
-    
-    latest_participant_file = max(participant_files, key=os.path.getctime)
-    
-    # Cargar participantes
-    with open(latest_participant_file, 'r', encoding='utf-8') as f:
-        participants = json.load(f)
-    
-    if not participants:
-        log("⚠️  No hay participantes para procesar")
-        return False
-    
-    # Definir campos para el CSV (exactamente como los necesitas)
-    fieldnames = [
-        'participants_url', 'BinomID', 'Dorsal', 'Guía', 'Perro', 'Raza', 'Edad', 
-        'Género', 'Altura (cm)', 'Nombre de Pedigree', 'País', 'Licencia', 'Club', 
-        'Federación', 'Equipo', 'event_uuid', 'event_title'
-    ]
-    
-    # Añadir campos de días/mangas (Día 1-6, Fecha 1-6, Mangas 1-6)
-    for i in range(1, 7):
-        fieldnames.extend([f'Día {i}', f'Fecha {i}', f'Mangas {i}'])
-    
-    # Guardar como CSV
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    csv_file = os.path.join(OUT_DIR, f'participantes_procesado_{today_str}.csv')
-    
-    with open(csv_file, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        
-        for participant in participants:
-            # Asegurar que todos los campos existan y reemplazar None por ''
-            row = {}
-            for field in fieldnames:
-                value = participant.get(field, '')
-                if value is None:
-                    value = ''
-                row[field] = value
-            writer.writerow(row)
-    
-    log(f"✅ Archivo CSV generado: {csv_file}")
-    
-    # Mostrar ejemplo del primer participante
-    if participants:
-        first_participant = participants[0]
-        print(f"\n📋 EJEMPLO DE PARTICIPANTE EXTRAÍDO:")
-        for field in ['Guía', 'Perro', 'Dorsal', 'Club', 'Raza']:
-            value = first_participant.get(field, 'N/A')
-            if value:
-                print(f"   {field}: {value}")
-    
-    return True
-
-def generate_final_json():
-    """Generar el archivo JSON final unificado"""
-    log("=== GENERANDO ARCHIVO JSON FINAL ===")
-    
-    # Buscar archivos más recientes
-    event_files = glob(os.path.join(OUT_DIR, "01events_*.json"))
-    detailed_files = glob(os.path.join(OUT_DIR, "02competiciones_detalladas_*.json"))
-    participant_files = glob(os.path.join(OUT_DIR, "03todos_participantes_*.json"))
-    
-    if not event_files:
-        log("❌ No se encontraron archivos de eventos")
-        return False
-    
-    # Cargar eventos
-    latest_event_file = max(event_files, key=os.path.getctime)
-    with open(latest_event_file, 'r', encoding='utf-8') as f:
-        events = json.load(f)
-    
-    # Cargar información detallada si existe
-    detailed_events = []
-    if detailed_files:
-        latest_detailed_file = max(detailed_files, key=os.path.getctime)
-        with open(latest_detailed_file, 'r', encoding='utf-8') as f:
-            detailed_events = json.load(f)
-    
-     # Cargar participantes si existen
-    all_participants = []
-    if participant_files:
-        latest_participant_file = max(participant_files, key=os.path.getctime)
-        with open(latest_participant_file, 'r', encoding='utf-8') as f:
-            all_participants = json.load(f)
-    
-    # Crear estructura final
-    final_data = {
-        'metadata': {
-            'fecha_generacion': datetime.now().isoformat(),
-            'total_eventos': len(events),
-            'total_eventos_detallados': len(detailed_events),
-            'total_participantes': len(all_participants),
-            'version': '1.0'
-        },
-        'eventos': events,
-        'eventos_detallados': detailed_events,
-        'participantes': all_participants
-    }
-    
-    # Guardar archivo final
-    final_file = os.path.join(OUT_DIR, "participants_completos_final.json")
-    with open(final_file, 'w', encoding='utf-8') as f:
-        json.dump(final_data, f, ensure_ascii=False, indent=2)
-    
-    log(f"✅ Archivo final JSON generado: {final_file}")
-    
-    # Resumen final
-    print(f"\n{'='*80}")
-    print("RESUMEN FINAL DEL PROCESO:")
-    print(f"{'='*80}")
-    print(f"📊 Eventos básicos: {len(events)}")
-    print(f"📊 Eventos con info detallada: {len(detailed_events)}")
-    print(f"📊 Total participantes: {len(all_participants)}")
-    
-    # Verificar archivos generados
-    print(f"\n📁 ARCHIVOS GENERADOS:")
-    output_files = glob(os.path.join(OUT_DIR, "*"))
-    for file in sorted(output_files):
-        size = os.path.getsize(file)
-        print(f"   {os.path.basename(file)} - {size} bytes")
-    
-    print(f"\n{'='*80}")
-    
-    return True
-
-# ============================== FUNCIÓN PRINCIPAL ==============================
-
-def main():
-    """Función principal"""
-    print("🚀 INICIANDO FLOWAGILITY SCRAPER COMPLETO")
-    print("📋 Este proceso realizará la extracción completa de datos de competiciones")
-    print(f"📂 Directorio de salida: {OUT_DIR}")
-    print("=" * 80)
-    
-    # Crear directorio de salida
-    os.makedirs(OUT_DIR, exist_ok=True)
-    
-    parser = argparse.ArgumentParser(description="FlowAgility Scraper Mejorado")
-    parser.add_argument("--module", choices=["events", "info", "participants", "csv", "all"], default="all", help="Módulo a ejecutar")
-    args = parser.parse_args()
-    
-    try:
-        success = True
-        
-        # Módulo 1: Eventos básicos
-        if args.module in ["events", "all"]:
-            log("🏁 INICIANDO EXTRACCIÓN DE EVENTOS BÁSICOS")
-            events = extract_events()
-            if not events:
-                log("❌ Falló la extracción de eventos")
-                success = False
-            else:
-                log("✅ Eventos básicos extraídos correctamente")
-        
-        # Módulo 2: Información detallada
-        if args.module in ["info", "all"] and success:
-            log("🏁 INICIANDO EXTRACCIÓN DE INFORMACIÓN DETALLADA")
-            detailed_events = extract_detailed_info()
-            if not detailed_events:
-                log("⚠️  No se pudo extraer información detallada, continuando con datos básicos")
-            else:
-                log("✅ Información detallada extraída correctamente")
-        
-        # Módulo 3: Participantes
-        if args.module in ["participants", "all"] and success:
-            log("🏁 INICIANDO EXTRACCIÓN DE PARTICIPANTES")
-            participants = extract_participants()
-            if not participants:
-                log("⚠️  No se pudo extraer participantes, continuando sin ellos")
-            else:
-                log("✅ Participantes extraídos correctamente")
-        
-        # Módulo 4: CSV Procesado
-        if args.module in ["csv", "all"] and success:
-            log("🏁 GENERANDO ARCHIVO CSV PROCESADO")
-            if not generate_csv_output():
-                log("⚠️  No se pudo generar el archivo CSV")
-            else:
-                log("✅ Archivo CSV generado correctamente")
-        
-        # Archivo final JSON
-        if args.module in ["all"] and success:
-            log("🏁 GENERANDO ARCHIVO FINAL JSON")
-            if not generate_final_json():
-                log("❌ Falló la generación del archivo final JSON")
-                success = False
-            else:
-                log("✅ Archivo final JSON generado correctamente")
-        
-        if success:
-            log("🎉 PROCESO COMPLETADO EXITOSAMENTE")
-            print("\n✅ Todos los módulos se ejecutaron correctamente")
-            print("📊 Los archivos están listos para GitHub Actions y FTP")
-        else:
-            log("❌ PROCESO COMPLETADO CON ERRORES")
-            print("\n⚠️  Algunos módulos tuvieron errores")
-            print("📋 Revisa los logs para más detalles")
-        
-        return success
-        
-    except Exception as e:
-        log(f"❌ ERROR CRÍTICO DURANTE LA EJECUCIÓN: {e}")
-        traceback.print_exc()
-        return False
-
-if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+            output_file = os.path.join(OUT_DIR, f'03todos_participantes_{today
