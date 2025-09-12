@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 FLOWAGILITY SCRAPER COMPLETO - SISTEMA DE EXTRACCIÓN DE DATOS DE COMPETICIONES
+Versión Beta (robusta para CI): imports separados, UUID/link canónicos, headless configurable,
+reintentos, OUT_DIR asegurado, alias de JSON final (participants/participantes).
 """
 
 import os
@@ -14,24 +16,42 @@ import argparse
 import traceback
 import unicodedata
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from urllib.parse import urljoin
 from pathlib import Path
 from glob import glob
 
-# Third-party imports
+# =============================================================================
+# Third-party imports (SEPARADOS) + flags
+# =============================================================================
+HAS_PANDAS = HAS_NUMPY = HAS_BS4 = HAS_DATEUTIL = False
+
 try:
-    import pandas as pd
-    import numpy as np
-    from dateutil import parser
-    from bs4 import BeautifulSoup
-    from dotenv import load_dotenv
+    import pandas as pd  # noqa: F401
     HAS_PANDAS = True
-except ImportError as e:
-    print(f"❌ Error importando pandas/numpy: {e}")
-    HAS_PANDAS = False
+except Exception as e:
+    print(f"⚠️ pandas no disponible: {e}")
+
+try:
+    import numpy as np  # noqa: F401
+    HAS_NUMPY = True
+except Exception as e:
+    print(f"⚠️ numpy no disponible: {e}")
+
+try:
+    from dateutil import parser as dt_parser
+    HAS_DATEUTIL = True
+except Exception as e:
+    print(f"⚠️ dateutil.parser no disponible: {e}")
+
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except Exception as e:
+    print(f"⚠️ BeautifulSoup no disponible: {e}")
 
 # Selenium imports
+HAS_SELENIUM = False
 try:
     from selenium import webdriver
     from selenium.webdriver.common.by import By
@@ -44,56 +64,57 @@ try:
     )
     from selenium.webdriver.chrome.service import Service
     HAS_SELENIUM = True
-except ImportError as e:
+except Exception as e:
     print(f"❌ Error importando Selenium: {e}")
     HAS_SELENIUM = False
 
+HAS_WEBDRIVER_MANAGER = False
 try:
     from webdriver_manager.chrome import ChromeDriverManager
     HAS_WEBDRIVER_MANAGER = True
-except ImportError as e:
+except Exception as e:
     print(f"❌ Error importando webdriver-manager: {e}")
     HAS_WEBDRIVER_MANAGER = False
 
-# ============================== CONFIGURACIÓN GLOBAL ==============================
-
-# Configuración base
+# =============================================================================
+# CONFIGURACIÓN GLOBAL
+# =============================================================================
 BASE = "https://www.flowagility.com"
 EVENTS_URL = f"{BASE}/zone/events"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-# Cargar variables de entorno
+# Cargar .env si existe
 try:
+    from dotenv import load_dotenv
     load_dotenv(SCRIPT_DIR / ".env")
-    print("✅ Variables de entorno cargadas")
+    print("✅ Variables de entorno cargadas (si existía .env)")
 except Exception as e:
-    print(f"❌ Error cargando .env: {e}")
+    print(f"⚠️ No se cargó .env (no crítico): {e}")
 
-# Credenciales
-FLOW_EMAIL = os.getenv("FLOW_EMAIL", "pilar1959suarez@gmail.com")
-FLOW_PASS = os.getenv("FLOW_PASS", "Seattle1")
+# Credenciales (tomadas del entorno/Secrets en CI)
+FLOW_EMAIL = os.getenv("FLOW_EMAIL", "")
+FLOW_PASS = os.getenv("FLOW_PASS", "")
 
 # Flags/tunables
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 INCOGNITO = os.getenv("INCOGNITO", "true").lower() == "true"
+HEADLESS_PARTICIPANTS = os.getenv("HEADLESS_PARTICIPANTS", os.getenv("HEADLESS", "true")).lower() == "true"
 MAX_SCROLLS = int(os.getenv("MAX_SCROLLS", "10"))
 SCROLL_WAIT_S = float(os.getenv("SCROLL_WAIT_S", "2.0"))
 OUT_DIR = os.getenv("OUT_DIR", "./output")
 
-print(f"📋 Configuración: HEADLESS={HEADLESS}, OUT_DIR={OUT_DIR}")
+print(f"📋 Configuración: HEADLESS={HEADLESS}, HEADLESS_PARTICIPANTS={HEADLESS_PARTICIPANTS}, OUT_DIR={OUT_DIR}")
 
-# ============================== UTILIDADES GENERALES ==============================
-
-def log(message):
-    """Función de logging"""
+# =============================================================================
+# UTILIDADES
+# =============================================================================
+def log(message: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
 
-def slow_pause(min_s=1, max_s=2):
-    """Pausa aleatoria"""
+def slow_pause(min_s=0.4, max_s=1.2):
     time.sleep(random.uniform(min_s, max_s))
 
 def _clean(s: str) -> str:
-    """Limpia y normaliza texto"""
     if not s:
         return ""
     s = str(s)
@@ -101,86 +122,63 @@ def _clean(s: str) -> str:
     s = re.sub(r"[ \t]+", " ", s)
     return s.strip(" \t\r\n-•*·:;")
 
+def with_retries(fn, attempts=3, sleep_s=2, desc="op"):
+    last = None
+    for k in range(1, attempts+1):
+        try:
+            return fn()
+        except (TimeoutException, StaleElementReferenceException, WebDriverException) as e:
+            last = e
+            log(f"⚠️ Retry {k}/{attempts} en {desc}: {e}")
+            time.sleep(sleep_s)
+    if last:
+        raise last
+
 def _parse_event_dates(date_string):
-    """Parsear fechas de eventos y calcular días restantes"""
-    if not date_string:
+    """Parsea fechas estilo 'Sep 13 - 14 · RFEC / Fed. Andaluza' (robusto si hay dateutil)."""
+    if not date_string or not HAS_DATEUTIL:
         return None, None, None
-    
     try:
-        # Patrones comunes de fechas
         patterns = [
-            r'(\w{3} \d{1,2}) - (\w{3} \d{1,2})',  # Sep 5 - Sep 7
-            r'(\d{1,2} \w{3}) - (\d{1,2} \w{3})',  # 5 Sep - 7 Sep
-            r'(\d{1,2}/\d{1,2}) - (\d{1,2}/\d{1,2})',  # 05/09 - 07/09
-            r'(\d{1,2} \w{3})',  # 5 Sep (evento de un día)
+            r'(\w{3}\s+\d{1,2})\s*-\s*(\w{3}\s+\d{1,2})',
+            r'(\d{1,2}\s+\w{3})\s*-\s*(\d{1,2}\s+\w{3})',
+            r'(\d{1,2}/\d{1,2})\s*-\s*(\d{1,2}/\d{1,2})',
+            r'(\d{1,2}\s+\w{3})'
         ]
-        
         today = datetime.now().date()
-        start_date = None
-        end_date = None
-        
+        start_date = end_date = None
+
         for pattern in patterns:
-            match = re.search(pattern, date_string, re.IGNORECASE)
-            if match:
-                if len(match.groups()) == 2:
-                    # Rango de fechas
-                    date1_str = match.group(1).strip()
-                    date2_str = match.group(2).strip()
-                    
-                    # Intentar parsear ambas fechas
-                    try:
-                        start_date = parser.parse(f"{date1_str} {today.year}", fuzzy=True).date()
-                        end_date = parser.parse(f"{date2_str} {today.year}", fuzzy=True).date()
-                        
-                        # Si la fecha final es anterior a la inicial, asumir próximo año
-                        if end_date < start_date:
-                            end_date = parser.parse(f"{date2_str} {today.year + 1}", fuzzy=True).date()
-                            
-                    except:
-                        try:
-                            start_date = parser.parse(date1_str, fuzzy=True).date()
-                            end_date = parser.parse(date2_str, fuzzy=True).date()
-                        except:
-                            pass
-                
-                elif len(match.groups()) == 1:
-                    # Evento de un día
-                    date_str = match.group(1).strip()
-                    try:
-                        start_date = parser.parse(f"{date_str} {today.year}", fuzzy=True).date()
-                        end_date = start_date
-                    except:
-                        try:
-                            start_date = parser.parse(date_str, fuzzy=True).date()
-                            end_date = start_date
-                        except:
-                            pass
-                
-                if start_date and end_date:
-                    break
-        
-        # Calcular días restantes
+            m = re.search(pattern, date_string, re.IGNORECASE)
+            if not m:
+                continue
+            if len(m.groups()) == 2:
+                d1, d2 = m.group(1).strip(), m.group(2).strip()
+                start_date = dt_parser.parse(f"{d1} {today.year}", fuzzy=True).date()
+                end_date   = dt_parser.parse(f"{d2} {today.year}", fuzzy=True).date()
+                if end_date < start_date:
+                    end_date = dt_parser.parse(f"{d2} {today.year+1}", fuzzy=True).date()
+            else:
+                d1 = m.group(1).strip()
+                start_date = dt_parser.parse(f"{d1} {today.year}", fuzzy=True).date()
+                end_date = start_date
+            break
+
         days_until = None
         if start_date:
-            if start_date >= today:
-                days_until = (start_date - today).days
-            else:
-                # Evento ya pasó
-                days_until = -1
-        
+            days_until = (start_date - today).days if start_date >= today else -1
         return start_date, end_date, days_until
-        
     except Exception as e:
         log(f"Error parseando fechas '{date_string}': {e}")
         return None, None, None
 
-# ============================== FUNCIONES DE NAVEGACIÓN ==============================
-
+# =============================================================================
+# SELENIUM
+# =============================================================================
 def _get_driver(headless=True, unique_id=""):
-    """Crea y configura el driver de Selenium con directorio único"""
     if not HAS_SELENIUM:
         raise ImportError("Selenium no está instalado")
-    
+
     opts = Options()
     if headless:
         opts.add_argument("--headless=new")
@@ -190,114 +188,65 @@ def _get_driver(headless=True, unique_id=""):
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    
-    # Directorio único de usuario para evitar conflictos
-    if unique_id:
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-extensions")
+    opts.add_argument("--remote-allow-origins=*")
+    ua = os.getenv("SCRAPER_UA", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+    opts.add_argument(f"--user-agent={ua}")
+
+    # Perfil temporal (Linux)
+    if unique_id and os.name != "nt":
         user_data_dir = f"/tmp/chrome_profile_{unique_id}_{int(time.time())}"
         opts.add_argument(f"--user-data-dir={user_data_dir}")
-    
+
+    chrome_bin = os.getenv("CHROME_BINARY") or os.getenv("GOOGLE_CHROME_SHIM")
+    if chrome_bin and os.path.exists(chrome_bin):
+        opts.binary_location = chrome_bin
+
     try:
         if HAS_WEBDRIVER_MANAGER:
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=opts)
         else:
             driver = webdriver.Chrome(options=opts)
-        
         driver.set_page_load_timeout(60)
         return driver
-        
     except Exception as e:
         log(f"Error creando driver: {e}")
         return None
 
-def _login(driver):
-    """Inicia sesión en FlowAgility"""
-    if not driver:
-        return False
-        
-    log("Iniciando login...")
-    
-    try:
-        driver.get(f"{BASE}/user/login")
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
-        
-        slow_pause(2, 3)
-        
-        # Buscar campos de login
-        email_field = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.NAME, "user[email]"))
-        )
-        password_field = driver.find_element(By.NAME, "user[password]")
-        submit_button = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
-        
-        # Llenar campos
-        email_field.clear()
-        email_field.send_keys(FLOW_EMAIL)
-        slow_pause(1, 2)
-        
-        password_field.clear()
-        password_field.send_keys(FLOW_PASS)
-        slow_pause(1, 2)
-        
-        # Hacer clic
-        submit_button.click()
-        
-        # Esperar a que se complete el login
-        WebDriverWait(driver, 30).until(
-            lambda d: "/user/login" not in d.current_url
-        )
-        
-        slow_pause(3, 5)
-        log("Login exitoso")
-        return True
-        
-    except Exception as e:
-        log(f"Error en login: {e}")
-        return False
-
 def _accept_cookies(driver):
-    """Aceptar cookies si es necesario"""
     try:
-        cookie_selectors = [
-            'button[aria-label="Accept all"]',
-            'button[aria-label="Aceptar todo"]',
+        selectors = [
             '[data-testid="uc-accept-all-button"]',
-            'button[mode="primary"]'
+            'button[aria-label*="Accept"]',
+            'button[aria-label*="Aceptar"]',
         ]
-        
-        for selector in cookie_selectors:
-            try:
-                cookie_btn = driver.find_elements(By.CSS_SELECTOR, selector)
-                if cookie_btn:
-                    cookie_btn[0].click()
-                    slow_pause(0.5, 1)
-                    log("Cookies aceptadas")
+        for sel in selectors:
+            btns = driver.find_elements(By.CSS_SELECTOR, sel)
+            if btns:
+                try:
+                    btns[0].click()
+                    slow_pause(0.2, 0.6)
+                    log("Cookies aceptadas (CSS)")
                     return True
-            except:
-                continue
-                
-        # Fallback con JavaScript
+                except Exception:
+                    pass
+        # JS fallback
         driver.execute_script("""
-            const buttons = document.querySelectorAll('button');
-            for (const btn of buttons) {
-                if (/aceptar|accept|consent|agree/i.test(btn.textContent)) {
-                    btn.click();
-                    break;
-                }
+            const bs = Array.from(document.querySelectorAll('button'));
+            for (const b of bs) {
+              const t = (b.textContent||'').toLowerCase();
+              if (/(aceptar|accept|agree|consent)/.test(t)) { b.click(); break; }
             }
         """)
-        slow_pause(0.5, 1)
+        slow_pause(0.2, 0.6)
         return True
-        
     except Exception as e:
         log(f"Error manejando cookies: {e}")
         return False
 
 def _full_scroll(driver):
-    """Scroll completo para cargar todos los elementos"""
     last_height = driver.execute_script("return document.body.scrollHeight")
     for _ in range(MAX_SCROLLS):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -307,176 +256,129 @@ def _full_scroll(driver):
             break
         last_height = new_height
 
-# ============================== MÓDULO 1: EXTRACCIÓN DE EVENTOS ==============================
+def _login(driver):
+    if not driver:
+        return False
+    log("Iniciando login...")
+    try:
+        with_retries(lambda: driver.get(f"{BASE}/user/login"), desc="get(login)")
+        with_retries(lambda: WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body"))), desc="wait body")
+        slow_pause(0.6, 1.0)
 
+        email_field = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.NAME, "user[email]")))
+        password_field = driver.find_element(By.NAME, "user[password]")
+        submit_button = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+
+        email_field.clear(); email_field.send_keys(FLOW_EMAIL); slow_pause()
+        password_field.clear(); password_field.send_keys(FLOW_PASS); slow_pause()
+        submit_button.click()
+
+        WebDriverWait(driver, 30).until(lambda d: "/user/login" not in d.current_url)
+        slow_pause(1.2, 2.0)
+        log("Login exitoso")
+        return True
+    except Exception as e:
+        log(f"Error en login: {e}")
+        return False
+
+# =============================================================================
+# MÓDULO 1: EXTRACCIÓN EVENTOS (básicos)
+# =============================================================================
 def extract_events():
-    """Función principal para extraer eventos básicos - VERSIÓN MEJORADA"""
-    if not HAS_SELENIUM:
-        log("Error: Selenium no está instalado")
+    if not HAS_SELENIUM or not HAS_BS4:
+        log("Error: Selenium o BeautifulSoup no están instalados")
         return None
-    
+
+    os.makedirs(OUT_DIR, exist_ok=True)
     log("=== MÓDULO 1: EXTRACCIÓN DE EVENTOS BÁSICOS ===")
-    
+
     driver = _get_driver(headless=HEADLESS, unique_id="module1")
     if not driver:
         log("❌ No se pudo crear el driver de Chrome")
         return None
-    
+
     try:
         if not _login(driver):
             raise Exception("No se pudo iniciar sesión")
-        
-        # Navegar a eventos
+
         log("Navegando a la página de eventos...")
-        driver.get(EVENTS_URL)
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
-        
-        # Aceptar cookies
+        with_retries(lambda: driver.get(EVENTS_URL), desc="get(EVENTS_URL)")
+        with_retries(lambda: WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body"))), desc="wait body")
         _accept_cookies(driver)
-        
-        # Scroll completo para cargar todos los eventos
+
         log("Cargando todos los eventos...")
         _full_scroll(driver)
-        slow_pause(2, 3)
-        
-        # Obtener HTML de la página
+        slow_pause(0.5, 1.2)
+
         page_html = driver.page_source
-        
-        # Guardar HTML para debugging
         debug_html_path = os.path.join(OUT_DIR, "debug_page.html")
         with open(debug_html_path, 'w', encoding='utf-8') as f:
             f.write(page_html)
         log(f"HTML de la página guardado en: {debug_html_path}")
-        
-        # Extraer eventos usando BeautifulSoup
-        log("Extrayendo información de eventos...")
+
         soup = BeautifulSoup(page_html, 'html.parser')
-        
-        # Buscar contenedores de eventos
-        event_containers = soup.find_all('div', class_='group mb-6')
-        log(f"Encontrados {len(event_containers)} contenedores de eventos")
-        
+
+        # Estrategia robusta: construir lista por UUID detectados en cualquier enlace "/zone/events/<uuid>"
+        seen = set()
         events = []
-        for i, container in enumerate(event_containers, 1):
-            try:
-                # Extraer información completa del evento
-                event_data = {}
-                
-                # ID del evento
-                event_id = container.get('id', '')
-                if event_id:
-                    event_data['id'] = event_id.replace('event-card-', '')
-                
-                # Nombre del evento
-                name_elem = container.find('div', class_='font-caption text-lg text-black truncate -mt-1')
-                if name_elem:
-                    event_data['nombre'] = _clean(name_elem.get_text())
-                
-                # Fechas
-                date_elem = container.find('div', class_='text-xs')
-                if date_elem:
-                    event_data['fechas'] = _clean(date_elem.get_text())
-                
-                # Organización
-                org_elems = container.find_all('div', class_='text-xs')
-                if len(org_elems) > 1:
-                    event_data['organizacion'] = _clean(org_elems[1].get_text())
-                
-                # Club organizador - BUSCAR ESPECÍFICAMENTE
-                club_elem = container.find('div', class_='text-xs mb-0.5 mt-0.5')
-                if club_elem:
-                    event_data['club'] = _clean(club_elem.get_text())
-                else:
-                    # Fallback: buscar en todos los divs con text-xs
-                    for div in container.find_all('div', class_='text-xs'):
-                        text = _clean(div.get_text())
-                        if text and not any(x in text for x in ['/', 'Spain', 'España']):
-                            event_data['club'] = text
-                            break
-                
-                # Lugar - BUSCAR PATRÓN CIUDAD/PAÍS
-                location_divs = container.find_all('div', class_='text-xs')
-                for div in location_divs:
-                    text = _clean(div.get_text())
-                    if '/' in text and any(x in text for x in ['Spain', 'España', 'Madrid', 'Barcelona']):
-                        event_data['lugar'] = text
-                        break
-                
-                # Si no encontramos lugar, buscar cualquier texto con /
-                if 'lugar' not in event_data:
-                    for div in location_divs:
-                        text = _clean(div.get_text())
-                        if '/' in text and len(text) < 100:  # Evitar textos muy largos
-                            event_data['lugar'] = text
-                            break
-                
-                # Enlaces
-                event_data['enlaces'] = {}
-                
-                # Enlace de información
-                info_link = container.find('a', href=lambda x: x and '/info/' in x)
-                if info_link:
-                    event_data['enlaces']['info'] = urljoin(BASE, info_link['href'])
-                
-                # Enlace de participantes - BUSCAR EXPLÍCITAMENTE
-                participant_links = container.find_all('a', href=lambda x: x and any(term in x for term in ['/participants', '/participantes']))
-                for link in participant_links:
-                    href = link.get('href', '')
-                    if '/participants_list' in href or '/participantes' in href:
-                        event_data['enlaces']['participantes'] = urljoin(BASE, href)
-                        break
-                
-                # Si no encontramos el enlace de participantes, construirlo
-                if 'participantes' not in event_data['enlaces'] and 'id' in event_data:
-                    event_data['enlaces']['participantes'] = f"{BASE}/zone/events/{event_data['id']}/participants_list"
-                
-                # Bandera del país
-                flag_elem = container.find('div', class_='text-md')
-                if flag_elem:
-                    event_data['pais_bandera'] = _clean(flag_elem.get_text())
-                else:
-                    event_data['pais_bandera'] = '🇪🇸'  # Valor por defecto
-                
-                # Parsear fechas y calcular días restantes
-                start_date, end_date, days_until = _parse_event_dates(event_data.get('fechas', ''))
-                if start_date:
-                    event_data['fecha_inicio'] = start_date.isoformat()
-                    event_data['fecha_fin'] = end_date.isoformat() if end_date else start_date.isoformat()
-                    event_data['dias_restantes'] = days_until
-                
-                events.append(event_data)
-                log(f"✅ Evento {i} procesado: {event_data.get('nombre', 'Sin nombre')}")
-                
-            except Exception as e:
-                log(f"❌ Error procesando evento {i}: {str(e)}")
+        for a in soup.select('a[href*="/zone/events/"]'):
+            href = a.get('href') or ''
+            m = re.search(r'/zone/events/([a-f0-9-]{36})(?:/|$)', href, re.I)
+            if not m:
                 continue
-        
-        # Guardar resultados
+            uuid = m.group(1)
+            if uuid in seen:
+                continue
+            seen.add(uuid)
+
+            event_data = {'id': uuid, 'enlaces': {}}
+            # Enlaces canónicos
+            event_data['enlaces']['info'] = urljoin(BASE, f"/zone/events/{uuid}")
+            event_data['enlaces']['participantes'] = urljoin(BASE, f"/zone/events/{uuid}/participants_list")
+
+            # Intenta encontrar el contenedor más cercano para rascar nombre/fechas
+            # (Fallo tolerante; si no se encuentra, se deja N/D)
+            container = a.find_parent()
+            name = ""
+            fechas = ""
+            if container:
+                # Nombre: intenta textos prominentes cercanos
+                cand = container.find(['h2', 'h3', 'div'])
+                if cand:
+                    name = _clean(cand.get_text())[:160]
+                # Fechas: busca textos pequeños con patrón mes/día
+                smalls = container.find_all('div')
+                for div in smalls:
+                    tx = _clean(div.get_text())
+                    if re.search(r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)\b', tx, re.I):
+                        fechas = tx
+                        break
+
+            event_data['nombre'] = name or f"Evento {uuid[:8]}..."
+            event_data['fechas'] = fechas
+            # País (placeholder): no siempre visible en listado; bandera opcional
+            event_data['pais_bandera'] = '🇪🇸'
+
+            # Fechas parseadas
+            s, e, d = _parse_event_dates(fechas)
+            if s:
+                event_data['fecha_inicio'] = s.isoformat()
+                event_data['fecha_fin'] = e.isoformat() if e else s.isoformat()
+                event_data['dias_restantes'] = d
+
+            events.append(event_data)
+
         today_str = datetime.now().strftime("%Y-%m-%d")
         output_file = os.path.join(OUT_DIR, f'01events_{today_str}.json')
-        os.makedirs(OUT_DIR, exist_ok=True)
-        
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(events, f, ensure_ascii=False, indent=2)
-        
         log(f"✅ Extracción completada. {len(events)} eventos guardados en {output_file}")
-        
-        # Mostrar resumen de lo extraído
-        print(f"\n{'='*80}")
-        print("RESUMEN DE CAMPOS EXTRAÍDOS:")
-        print(f"{'='*80}")
-        for event in events[:5]:  # Mostrar primeros 5 eventos como ejemplo
-            print(f"\nEvento: {event.get('nombre', 'N/A')}")
-            print(f"  Club: {event.get('club', 'No extraído')}")
-            print(f"  Lugar: {event.get('lugar', 'No extraído')}")
-            print(f"  Días restantes: {event.get('dias_restantes', 'N/A')}")
-            print(f"  Enlace participantes: {event.get('enlaces', {}).get('participantes', 'No extraído')}")
-        print(f"\n{'='*80}")
-        
+
+        # Resumen breve
+        for ev in events[:5]:
+            print(f"- {ev.get('nombre')} | participantes: {ev['enlaces'].get('participantes')} | días_restantes={ev.get('dias_restantes')}")
         return events
-        
+
     except Exception as e:
         log(f"❌ Error durante el scraping: {str(e)}")
         traceback.print_exc()
@@ -485,178 +387,134 @@ def extract_events():
         try:
             driver.quit()
             log("Navegador cerrado")
-        except:
+        except Exception:
             pass
 
-# ============================== MÓDULO 2: INFORMACIÓN DETALLADA ==============================
+# =============================================================================
+# MÓDULO 2: INFO DETALLADA
+# =============================================================================
+def _extract_participants_count(driver):
+    try:
+        rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+        if len(rows) > 3:
+            return len(rows)
+
+        items = driver.find_elements(By.CSS_SELECTOR, ".booking-item, .participant, [data-participant-id]")
+        if len(items) > 3:
+            return len(items)
+
+        page_text = driver.find_element(By.TAG_NAME, "body").text
+        for rx in (r'(\d+)\s*participantes?', r'(\d+)\s*inscritos?', r'(\d+)\s*competidores?', r'total[:\s]*(\d+)'):
+            m = re.search(rx, page_text, re.I)
+            if m:
+                return int(m.group(1))
+
+        nums = [int(n) for n in re.findall(r'\b\d+\b', page_text) if 5 < int(n) < 3000]
+        if nums:
+            return max(nums)
+        return 0
+    except Exception as e:
+        log(f"Error en conteo de participantes: {e}")
+        return 0
 
 def extract_detailed_info():
-    """Extraer información detallada de cada evento incluyendo número de participantes"""
-    if not HAS_SELENIUM:
-        log("Error: Selenium no está instalado")
+    if not HAS_SELENIUM or not HAS_BS4:
+        log("Error: Selenium o BeautifulSoup no están instalados")
         return None
-    
+
+    os.makedirs(OUT_DIR, exist_ok=True)
     log("=== MÓDULO 2: EXTRACCIÓN DE INFORMACIÓN DETALLADA ===")
-    
-    # Buscar el archivo de eventos más reciente
+
     event_files = glob(os.path.join(OUT_DIR, "01events_*.json"))
     if not event_files:
         log("❌ No se encontraron archivos de eventos")
         return None
-    
     latest_event_file = max(event_files, key=os.path.getctime)
-    
-    # Cargar eventos
+
     with open(latest_event_file, 'r', encoding='utf-8') as f:
         events = json.load(f)
-    
     log(f"✅ Cargados {len(events)} eventos desde {latest_event_file}")
-    
+
     driver = _get_driver(headless=HEADLESS, unique_id="module2")
     if not driver:
         log("❌ No se pudo crear el driver de Chrome")
         return None
-    
+
     try:
         if not _login(driver):
             raise Exception("No se pudo iniciar sesión")
-        
+
         detailed_events = []
-        
+
         for i, event in enumerate(events, 1):
             try:
-                # PRESERVAR CAMPOS ORIGINALES IMPORTANTES
-                preserved_fields = ['id', 'nombre', 'fechas', 'organizacion', 'club', 'lugar', 'enlaces', 'pais_bandera', 'fecha_inicio', 'fecha_fin', 'dias_restantes']
+                preserved_fields = ['id', 'nombre', 'fechas', 'organizacion', 'club', 'lugar',
+                                    'enlaces', 'pais_bandera', 'fecha_inicio', 'fecha_fin', 'dias_restantes']
                 detailed_event = {field: event.get(field, '') for field in preserved_fields}
-                
-                # Inicializar contador de participantes
                 detailed_event['num_participantes'] = 0
                 detailed_event['participantes_info'] = {}
-                
-                # Verificar si tiene enlace de información
-                if 'enlaces' in event and 'info' in event['enlaces']:
-                    info_url = event['enlaces']['info']
-                    
+
+                info_url = event.get('enlaces', {}).get('info')
+                if info_url:
                     log(f"Procesando evento {i}/{len(events)}: {event.get('nombre', 'Sin nombre')}")
-                    
-                    # Navegar a la página de información
-                    driver.get(info_url)
-                    WebDriverWait(driver, 20).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "body"))
-                    )
-                    
-                    slow_pause(2, 3)
-                    
-                    # Obtener HTML de la página
+                    with_retries(lambda: driver.get(info_url), desc=f"get(info {i})")
+                    with_retries(lambda: WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body"))), desc="wait body")
+                    slow_pause(0.5, 1.0)
+
                     page_html = driver.page_source
-                    soup = BeautifulSoup(page_html, 'html.parser')
-                    
-                    # ===== INFORMACIÓN ADICIONAL =====
+                    soup = BeautifulSoup(page_html, 'html.parser') if HAS_BS4 else None
+
                     additional_info = {}
-                    
-                    # Intentar mejorar información de club si no está completa
-                    if not detailed_event.get('club') or detailed_event.get('club') in ['N/D', '']:
-                        club_elems = soup.find_all(lambda tag: any(word in tag.get_text().lower() for word in ['club', 'organizador', 'organizer']))
-                        for elem in club_elems:
-                            text = _clean(elem.get_text())
-                            if text and len(text) < 100:  # Evitar textos muy largos
-                                detailed_event['club'] = text
-                                break
-                    
-                    # Intentar mejorar información de lugar si no está completa
-                    if not detailed_event.get('lugar') or detailed_event.get('lugar') in ['N/D', '']:
-                        location_elems = soup.find_all(lambda tag: any(word in tag.get_text().lower() for word in ['lugar', 'ubicacion', 'location', 'place']))
-                        for elem in location_elems:
-                            text = _clean(elem.get_text())
-                            if text and ('/' in text or any(x in text for x in ['Spain', 'España'])):
-                                detailed_event['lugar'] = text
-                                break
-                    
-                    # Extraer información general adicional
-                    title_elem = soup.find('h1')
-                    if title_elem:
-                        additional_info['titulo_completo'] = _clean(title_elem.get_text())
-                    
-                    # Extraer descripción si existe
-                    description_elem = soup.find('div', class_=lambda x: x and any(word in str(x).lower() for word in ['description', 'descripcion', 'info']))
-                    if description_elem:
-                        additional_info['descripcion'] = _clean(description_elem.get_text())
-                    
-                    # Añadir información adicional al evento
+                    if soup:
+                        title_elem = soup.find('h1')
+                        if title_elem:
+                            additional_info['titulo_completo'] = _clean(title_elem.get_text())
+                        description_elem = soup.find('div', class_=lambda x: x and any(z in str(x).lower() for z in ['description', 'descripcion', 'info']))
+                        if description_elem:
+                            additional_info['descripcion'] = _clean(description_elem.get_text())
+
                     detailed_event['informacion_adicional'] = additional_info
-                    
-                else:
-                    log(f"Evento {i} no tiene enlace de información, usando datos básicos")
-                
-                # ===== EXTRAER NÚMERO DE PARTICIPANTES =====
-                if 'enlaces' in event and 'participantes' in event['enlaces']:
-                    participants_url = event['enlaces']['participantes']
-                    log(f"  📊 Extrayendo número de participantes de: {participants_url}")
-                    
+
+                part_url = event.get('enlaces', {}).get('participantes')
+                if part_url:
+                    log(f"  📊 Extrayendo número de participantes de: {part_url}")
                     try:
-                        # Navegar a la página de participantes
-                        driver.get(participants_url)
-                        WebDriverWait(driver, 15).until(
-                            EC.presence_of_element_located((By.TAG_NAME, "body"))
-                        )
-                        
-                        slow_pause(2, 3)
-                        
-                        # Extraer número de participantes usando diferentes métodos
+                        with_retries(lambda: driver.get(part_url), desc=f"get(part {i})")
+                        with_retries(lambda: WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body"))), desc="wait body")
+                        slow_pause(0.6, 1.0)
                         num_participants = _extract_participants_count(driver)
                         detailed_event['num_participantes'] = num_participants
                         detailed_event['participantes_info'] = {
-                            'url': participants_url,
+                            'url': part_url,
                             'timestamp_consulta': datetime.now().isoformat(),
-                            'metodo_extraccion': 'contador_pagina'
+                            'metodo_extraccion': 'heuristica_conteo'
                         }
-                        
                         log(f"  ✅ Encontrados {num_participants} participantes")
-                        
                     except Exception as e:
                         log(f"  ❌ Error extrayendo participantes: {e}")
                         detailed_event['participantes_info']['error'] = str(e)
-                
+
                 detailed_event['timestamp_extraccion'] = datetime.now().isoformat()
                 detailed_events.append(detailed_event)
-                slow_pause(1, 2)  # Pausa entre solicitudes
-                
+                slow_pause(0.3, 0.8)
+
             except Exception as e:
                 log(f"❌ Error procesando evento {i}: {str(e)}")
-                detailed_events.append(event)  # Mantener datos originales
+                detailed_events.append(event)
                 continue
-        
-        # Guardar información detallada
+
         today_str = datetime.now().strftime("%Y-%m-%d")
         output_file = os.path.join(OUT_DIR, f'02competiciones_detalladas_{today_str}.json')
-        
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(detailed_events, f, ensure_ascii=False, indent=2)
-        
         log(f"✅ Información detallada guardada en {output_file}")
-        
-        # Mostrar resumen de participantes
-        total_participants = sum(event.get('num_participantes', 0) for event in detailed_events)
-        events_with_participants = sum(1 for event in detailed_events if event.get('num_participantes', 0) > 0)
-        
-        print(f"\n{'='*80}")
-        print("RESUMEN DE PARTICIPANTES EXTRAÍDOS:")
-        print(f"{'='*80}")
-        print(f"📊 Total eventos procesados: {len(detailed_events)}")
-        print(f"📊 Eventos con participantes: {events_with_participants}")
-        print(f"📊 Total participantes encontrados: {total_participants}")
-        
-        # Mostrar top 5 eventos con más participantes
-        events_sorted = sorted(detailed_events, key=lambda x: x.get('num_participantes', 0), reverse=True)
-        print(f"\n🏆 TOP 5 EVENTOS CON MÁS PARTICIPANTES:")
-        for i, event in enumerate(events_sorted[:5], 1):
-            if event.get('num_participantes', 0) > 0:
-                print(f"  {i}. {event.get('nombre', 'N/A')}: {event.get('num_participantes', 0)} participantes")
-        
-        print(f"{'='*80}")
-        
+
+        total_participants = sum(ev.get('num_participantes', 0) for ev in detailed_events)
+        events_with_participants = sum(1 for ev in detailed_events if ev.get('num_participantes', 0) > 0)
+        print(f"📊 Total eventos: {len(detailed_events)} | con participantes: {events_with_participants} | total participantes: {total_participants}")
+
         return detailed_events
-        
+
     except Exception as e:
         log(f"❌ Error durante la extracción detallada: {str(e)}")
         traceback.print_exc()
@@ -664,174 +522,20 @@ def extract_detailed_info():
     finally:
         try:
             driver.quit()
-        except:
+        except Exception:
             pass
 
-def _extract_participants_count(driver):
-    """Extraer el número de participantes de la página usando múltiples métodos"""
-    from selenium.webdriver.common.by import By
-    
-    try:
-        # Método 1: Buscar contadores específicos en la página
-        count_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'participante') or contains(text(), 'inscrito') or contains(text(), 'competidor')]")
-        
-        for element in count_elements:
-            text = element.text.lower()
-            # Buscar patrones como "X participantes", "Total: Y", etc.
-            patterns = [
-                r'(\d+)\s*participantes?',
-                r'(\d+)\s*inscritos?',
-                r'(\d+)\s*competidores?',
-                r'total[:\s]*(\d+)',
-                r'count[:\s]*(\d+)'
-            ]
-            
-            for pattern in patterns:
-                match = re.search(pattern, text)
-                if match:
-                    return int(match.group(1))
-        
-        # Método 2: Buscar elementos de lista o tabla
-        participant_items = driver.find_elements(By.CSS_SELECTOR, "tr, .participant, .competitor, .booking-item, [data-participant]")
-        if participant_items:
-            return len(participant_items)
-        
-        # Método 3: Buscar en toda la página
-        page_text = driver.find_element(By.TAG_NAME, "body").text
-        numbers = re.findall(r'\b(\d+)\s*participantes?\b', page_text, re.IGNORECASE)
-        if numbers:
-            return max(map(int, numbers))
-        
-        # Método 4: Buscar cualquier número que pueda ser un contador
-        all_numbers = re.findall(r'\b\d+\b', page_text)
-        if all_numbers:
-            # Filtrar números que podrían ser contadores (no años, no dorsales pequeños)
-            possible_counts = [int(n) for n in all_numbers if 5 < int(n) < 1000]
-            if possible_counts:
-                return max(possible_counts)
-        
-        return 0
-        
-    except Exception as e:
-        log(f"Error en conteo de participantes: {e}")
-        return 0
-
-# ============================== MÓDULO 3: EXTRACCIÓN DE PARTICIPANTES ==============================
-
-def extract_participants():
-    """Extraer información de participantes de cada evento"""
-    if not HAS_SELENIUM:
-        log("Error: Selenium no está instalado")
-        return None
-    
-    log("=== MÓDULO 3: EXTRACCIÓN DE PARTICIPANTES ===")
-    
-    # Buscar el archivo de eventos detallados más reciente
-    detailed_files = glob(os.path.join(OUT_DIR, "02competiciones_detalladas_*.json"))
-    if not detailed_files:
-        log("❌ No se encontraron archivos de eventos detallados")
-        return None
-    
-    latest_detailed_file = max(detailed_files, key=os.path.getctime)
-    
-    # Cargar eventos detallados
-    with open(latest_detailed_file, 'r', encoding='utf-8') as f:
-        events = json.load(f)
-    
-    log(f"✅ Cargados {len(events)} eventos detallados desde {latest_detailed_file}")
-    
-    driver = _get_driver(headless=False, unique_id="module3")  # headless=False para debugging
-    if not driver:
-        log("❌ No se pudo crear el driver de Chrome")
-        return None
-    
-    try:
-        if not _login(driver):
-            raise Exception("No se pudo iniciar sesión")
-        
-        all_participants = []
-        events_with_participants = 0
-        
-        for i, event in enumerate(events, 1):
-            try:
-                # Verificar si tiene enlace de participantes
-                if 'enlaces' in event and 'participantes' in event['enlaces']:
-                    participants_url = event['enlaces']['participantes']
-                    
-                    log(f"📋 Procesando participantes {i}/{len(events)}: {event.get('nombre', 'Sin nombre')}")
-                    log(f"   URL: {participants_url}")
-                    
-                    # Navegar a la página de participantes
-                    driver.get(participants_url)
-                    WebDriverWait(driver, 20).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "body"))
-                    )
-                    
-                    slow_pause(3, 5)
-                    
-                    # SIMULACIÓN: Crear datos de participantes de ejemplo
-                    participants_data = _create_sample_participants(participants_url, event)
-                    
-                    if participants_data:
-                        events_with_participants += 1
-                        log(f"  ✅ Generados {len(participants_data)} participantes de ejemplo")
-                        
-                        # Guardar participantes de este evento
-                        event_participants_file = os.path.join(OUT_DIR, f"participantes_{event.get('id', 'unknown')}.json")
-                        with open(event_participants_file, 'w', encoding='utf-8') as f:
-                            json.dump(participants_data, f, ensure_ascii=False, indent=2)
-                        
-                        all_participants.extend(participants_data)
-                    else:
-                        log(f"  ⚠️  No se generaron participantes")
-                
-                else:
-                    log(f"Evento {i} no tiene enlace de participantes")
-                
-                slow_pause(2, 3)  # Pausa entre eventos
-                
-            except Exception as e:
-                log(f"❌ Error procesando participantes del evento {i}: {str(e)}")
-                continue
-        
-        # Guardar todos los participantes
-        if all_participants:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            output_file = os.path.join(OUT_DIR, f'03todos_participantes_{today_str}.json')
-            
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(all_participants, f, ensure_ascii=False, indent=2)
-            
-            log(f"✅ Total de {len(all_participants)} participantes guardados en {output_file}")
-            log(f"✅ {events_with_participants} eventos con participantes procesados")
-        else:
-            log("⚠️  No se generaron participantes para ningún evento")
-        
-        return all_participants
-        
-    except Exception as e:
-        log(f"❌ Error durante la extracción de participantes: {str(e)}")
-        traceback.print_exc()
-        return None
-    finally:
-        try:
-            driver.quit()
-        except:
-            pass
-
+# =============================================================================
+# MÓDULO 3: PARTICIPANTES (BETA -> datos de ejemplo)
+# =============================================================================
 def _create_sample_participants(participants_url, event):
-    """Crear datos de participantes de ejemplo (para testing)"""
     sample_data = []
-    
-    # Datos de ejemplo realistas
     guides = ["Margarita Andujar", "Carlos López", "Ana García", "Javier Martínez", "Laura Rodríguez"]
     dogs = ["Blackyborij", "Luna", "Rocky", "Bella", "Thor", "Max", "Toby", "Coco", "Daisy", "Buddy"]
     breeds = ["Spanish Water Dog", "Border Collie", "Pastor Alemán", "Labrador", "Golden Retriever"]
     clubs = ["La Dama", "Agility Trust", "El Área Jerez", "Club Agility Badalona", "A.D Agility Pozuelo"]
-    
-    # Crear 5-10 participantes de ejemplo por evento
+
     num_participants = random.randint(5, 10)
-    
     for i in range(num_participants):
         participant = {
             'participants_url': participants_url,
@@ -847,184 +551,233 @@ def _create_sample_participants(participants_url, event):
             'País': "Spain",
             'Licencia': str(random.randint(10000, 99999)),
             'Club': random.choice(clubs),
-            'Federación': "RSCE",
+            'Federación': random.choice(["RSCE", "RFEC"]),
             'Equipo': "No disponible",
             'event_uuid': event.get('id', ''),
             'event_title': event.get('nombre', 'N/D')
         }
-        
-        # Añadir información de mangas/días (3 días típicos)
         for day in range(1, 4):
             participant[f'Día {day}'] = ["Viernes", "Sábado", "Domingo"][day-1]
             participant[f'Fecha {day}'] = f"Sep {5 + day}, 2025"
             participant[f'Mangas {day}'] = f"G{random.randint(1, 3)} / {random.choice(['I', 'L', 'M', 'S'])}"
-        
-        # Días 4-6 vacíos
-        for day in range(4, 7):
+        for day in range(4, 6+1):
             participant[f'Día {day}'] = ""
             participant[f'Fecha {day}'] = ""
             participant[f'Mangas {day}'] = ""
-        
         sample_data.append(participant)
-    
     return sample_data
 
-# ============================== MÓDULO 4: GENERACIÓN DE ARCHIVOS FINALES ==============================
+def extract_participants():
+    if not HAS_SELENIUM:
+        log("Error: Selenium no está instalado")
+        return None
 
+    os.makedirs(OUT_DIR, exist_ok=True)
+    log("=== MÓDULO 3: EXTRACCIÓN DE PARTICIPANTES (BETA: MOCK DATA) ===")
+
+    detailed_files = glob(os.path.join(OUT_DIR, "02competiciones_detalladas_*.json"))
+    if not detailed_files:
+        log("❌ No se encontraron archivos de eventos detallados")
+        return None
+    latest_detailed_file = max(detailed_files, key=os.path.getctime)
+    with open(latest_detailed_file, 'r', encoding='utf-8') as f:
+        events = json.load(f)
+
+    log(f"✅ Cargados {len(events)} eventos detallados desde {latest_detailed_file}")
+
+    driver = _get_driver(headless=HEADLESS_PARTICIPANTS, unique_id="module3")
+    if not driver:
+        log("❌ No se pudo crear el driver de Chrome")
+        return None
+
+    try:
+        if not _login(driver):
+            raise Exception("No se pudo iniciar sesión")
+
+        all_participants = []
+        events_with_participants = 0
+
+        for i, event in enumerate(events, 1):
+            try:
+                participants_url = event.get('enlaces', {}).get('participantes')
+                if participants_url:
+                    log(f"📋 Procesando participantes {i}/{len(events)}: {event.get('nombre', 'Sin nombre')}")
+                    log(f"   URL: {participants_url}")
+                    with_retries(lambda: driver.get(participants_url), desc=f"get(participants {i})")
+                    with_retries(lambda: WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body"))), desc="wait body")
+                    slow_pause(0.8, 1.5)
+
+                    # Datos de ejemplo (BETA)
+                    participants_data = _create_sample_participants(participants_url, event)
+                    if participants_data:
+                        events_with_participants += 1
+                        event_participants_file = os.path.join(OUT_DIR, f"participantes_{event.get('id', 'unknown')}.json")
+                        with open(event_participants_file, 'w', encoding='utf-8') as f:
+                            json.dump(participants_data, f, ensure_ascii=False, indent=2)
+                        all_participants.extend(participants_data)
+                        log(f"  ✅ Generados {len(participants_data)} participantes de ejemplo")
+                    else:
+                        log(f"  ⚠️ No se generaron participantes")
+                else:
+                    log(f"Evento {i} no tiene enlace de participantes")
+                slow_pause(0.4, 1.0)
+            except Exception as e:
+                log(f"❌ Error procesando participantes del evento {i}: {str(e)}")
+                continue
+
+        if all_participants:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            output_file = os.path.join(OUT_DIR, f'03todos_participantes_{today_str}.json')
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(all_participants, f, ensure_ascii=False, indent=2)
+            log(f"✅ Total de {len(all_participants)} participantes guardados en {output_file}")
+            log(f"✅ {events_with_participants} eventos con participantes procesados")
+        else:
+            log("⚠️ No se generaron participantes para ningún evento")
+
+        return all_participants
+
+    except Exception as e:
+        log(f"❌ Error durante la extracción de participantes: {str(e)}")
+        traceback.print_exc()
+        return None
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+# =============================================================================
+# MÓDULO 4: CSV + JSON FINAL
+# =============================================================================
 def generate_csv_output():
-    """Generar archivo CSV procesado con la estructura requerida"""
+    os.makedirs(OUT_DIR, exist_ok=True)
     log("=== GENERANDO ARCHIVO CSV PROCESADO ===")
-    
-    # Buscar archivo de participantes más reciente
+
     participant_files = glob(os.path.join(OUT_DIR, "03todos_participantes_*.json"))
     if not participant_files:
         log("❌ No se encontraron archivos de participantes")
         return False
-    
     latest_participant_file = max(participant_files, key=os.path.getctime)
-    
-    # Cargar participantes
+
     with open(latest_participant_file, 'r', encoding='utf-8') as f:
         participants = json.load(f)
-    
+
     if not participants:
-        log("⚠️  No hay participantes para procesar")
+        log("⚠️ No hay participantes para procesar")
         return False
-    
-    # Definir campos para el CSV (exactamente como los necesitas)
+
     fieldnames = [
-        'participants_url', 'BinomID', 'Dorsal', 'Guía', 'Perro', 'Raza', 'Edad', 
-        'Género', 'Altura (cm)', 'Nombre de Pedigree', 'País', 'Licencia', 'Club', 
+        'participants_url', 'BinomID', 'Dorsal', 'Guía', 'Perro', 'Raza', 'Edad',
+        'Género', 'Altura (cm)', 'Nombre de Pedigree', 'País', 'Licencia', 'Club',
         'Federación', 'Equipo', 'event_uuid', 'event_title'
     ]
-    
-    # Añadir campos de días/mangas (Día 1-6, Fecha 1-6, Mangas 1-6)
-    for i in range(1, 7):
+    for i in range(1, 6+1):
         fieldnames.extend([f'Día {i}', f'Fecha {i}', f'Mangas {i}'])
-    
-    # Guardar como CSV
+
     today_str = datetime.now().strftime("%Y-%m-%d")
     csv_file = os.path.join(OUT_DIR, f'participantes_procesado_{today_str}.csv')
-    
+
     with open(csv_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        
         for participant in participants:
-            # Asegurar que todos los campos existan y reemplazar None por ''
-            row = {}
-            for field in fieldnames:
-                value = participant.get(field, '')
-                if value is None:
-                    value = ''
-                row[field] = value
+            row = {fn: (participant.get(fn, '') or '') for fn in fieldnames}
             writer.writerow(row)
-    
+
     log(f"✅ Archivo CSV generado: {csv_file}")
-    
-    # Mostrar ejemplo del primer participante
+
     if participants:
-        first_participant = participants[0]
-        print(f"\n📋 EJEMPLO DE PARTICIPANTE EXTRAÍDO:")
+        first = participants[0]
+        print("📋 EJEMPLO:")
         for field in ['Guía', 'Perro', 'Dorsal', 'Club', 'Raza']:
-            value = first_participant.get(field, 'N/A')
-            if value:
-                print(f"   {field}: {value}")
-    
+            print(f"   {field}: {first.get(field, 'N/A')}")
     return True
 
 def generate_final_json():
-    """Generar el archivo JSON final unificado"""
+    os.makedirs(OUT_DIR, exist_ok=True)
     log("=== GENERANDO ARCHIVO JSON FINAL ===")
-    
-    # Buscar archivos más recientes
+
     event_files = glob(os.path.join(OUT_DIR, "01events_*.json"))
     detailed_files = glob(os.path.join(OUT_DIR, "02competiciones_detalladas_*.json"))
     participant_files = glob(os.path.join(OUT_DIR, "03todos_participantes_*.json"))
-    
+
     if not event_files:
         log("❌ No se encontraron archivos de eventos")
         return False
-    
-    # Cargar eventos
+
     latest_event_file = max(event_files, key=os.path.getctime)
     with open(latest_event_file, 'r', encoding='utf-8') as f:
         events = json.load(f)
-    
-    # Cargar información detallada si existe
+
     detailed_events = []
     if detailed_files:
         latest_detailed_file = max(detailed_files, key=os.path.getctime)
         with open(latest_detailed_file, 'r', encoding='utf-8') as f:
             detailed_events = json.load(f)
-    
-    # Cargar participantes si existen
+
     all_participants = []
     if participant_files:
         latest_participant_file = max(participant_files, key=os.path.getctime)
         with open(latest_participant_file, 'r', encoding='utf-8') as f:
             all_participants = json.load(f)
-    
-    # Crear estructura final
+
     final_data = {
         'metadata': {
             'fecha_generacion': datetime.now().isoformat(),
             'total_eventos': len(events),
             'total_eventos_detallados': len(detailed_events),
             'total_participantes': len(all_participants),
-            'version': '1.0'
+            'version': '1.0-beta'
         },
         'eventos': events,
         'eventos_detallados': detailed_events,
         'participantes': all_participants
     }
-    
-    # Guardar archivo final
+
+    # Nombre requerido por tu workflow (participants_completos_final.json)
     final_file = os.path.join(OUT_DIR, "participants_completos_final.json")
     with open(final_file, 'w', encoding='utf-8') as f:
         json.dump(final_data, f, ensure_ascii=False, indent=2)
-    
+
+    # Alias ES para compatibilidad con tu front legado (participantes...)
+    alias_file = os.path.join(OUT_DIR, "participantes_completos_final.json")
+    try:
+        with open(alias_file, 'w', encoding='utf-8') as f:
+            json.dump(final_data, f, ensure_ascii=False, indent=2)
+        log(f"✅ Alias final JSON generado: {alias_file}")
+    except Exception as e:
+        log(f"⚠️ No se pudo escribir alias ES: {e}")
+
     log(f"✅ Archivo final JSON generado: {final_file}")
-    
-    # Resumen final
-    print(f"\n{'='*80}")
-    print("RESUMEN FINAL DEL PROCESO:")
-    print(f"{'='*80}")
-    print(f"📊 Eventos básicos: {len(events)}")
-    print(f"📊 Eventos con info detallada: {len(detailed_events)}")
-    print(f"📊 Total participantes: {len(all_participants)}")
-    
-    # Verificar archivos generados
-    print(f"\n📁 ARCHIVOS GENERADOS:")
-    output_files = glob(os.path.join(OUT_DIR, "*"))
-    for file in sorted(output_files):
-        size = os.path.getsize(file)
-        print(f"   {os.path.basename(file)} - {size} bytes")
-    
-    print(f"\n{'='*80}")
-    
+
+    # Imprimir inventario
+    print("\n📁 ARCHIVOS EN output/:")
+    for file in sorted(glob(os.path.join(OUT_DIR, "*"))):
+        try:
+            size = os.path.getsize(file)
+            print(f"   {os.path.basename(file)} - {size} bytes")
+        except Exception:
+            pass
     return True
 
-# ============================== FUNCIÓN PRINCIPAL ==============================
-
+# =============================================================================
+# MAIN
+# =============================================================================
 def main():
-    """Función principal"""
-    print("🚀 INICIANDO FLOWAGILITY SCRAPER COMPLETO")
-    print("📋 Este proceso realizará la extracción completa de datos de competiciones")
+    print("🚀 INICIANDO FLOWAGILITY SCRAPER COMPLETO (BETA)")
     print(f"📂 Directorio de salida: {OUT_DIR}")
     print("=" * 80)
-    
-    # Crear directorio de salida
     os.makedirs(OUT_DIR, exist_ok=True)
-    
-    parser = argparse.ArgumentParser(description="FlowAgility Scraper Mejorado")
-    parser.add_argument("--module", choices=["events", "info", "participants", "csv", "all"], default="all", help="Módulo a ejecutar")
+
+    parser = argparse.ArgumentParser(description="FlowAgility Scraper Mejorado (Beta)")
+    parser.add_argument("--module", choices=["events", "info", "participants", "csv", "all"], default="all",
+                        help="Módulo a ejecutar")
     args = parser.parse_args()
-    
+
     try:
         success = True
-        
-        # Módulo 1: Eventos básicos
+
         if args.module in ["events", "all"]:
             log("🏁 INICIANDO EXTRACCIÓN DE EVENTOS BÁSICOS")
             events = extract_events()
@@ -1033,34 +786,30 @@ def main():
                 success = False
             else:
                 log("✅ Eventos básicos extraídos correctamente")
-        
-        # Módulo 2: Información detallada
+
         if args.module in ["info", "all"] and success:
             log("🏁 INICIANDO EXTRACCIÓN DE INFORMACIÓN DETALLADA")
             detailed_events = extract_detailed_info()
             if not detailed_events:
-                log("⚠️  No se pudo extraer información detallada, continuando con datos básicos")
+                log("⚠️ No se pudo extraer información detallada, continuando con datos básicos")
             else:
                 log("✅ Información detallada extraída correctamente")
-        
-        # Módulo 3: Participantes
+
         if args.module in ["participants", "all"] and success:
-            log("🏁 INICIANDO EXTRACCIÓN DE PARTICIPANTES")
+            log("🏁 INICIANDO EXTRACCIÓN DE PARTICIPANTES (BETA)")
             participants = extract_participants()
             if not participants:
-                log("⚠️  No se pudo extraer participantes, continuando sin ellos")
+                log("⚠️ No se pudo extraer participantes, continuando sin ellos")
             else:
                 log("✅ Participantes extraídos correctamente")
-        
-        # Módulo 4: CSV Procesado
+
         if args.module in ["csv", "all"] and success:
             log("🏁 GENERANDO ARCHIVO CSV PROCESADO")
             if not generate_csv_output():
-                log("⚠️  No se pudo generar el archivo CSV")
+                log("⚠️ No se pudo generar el archivo CSV")
             else:
                 log("✅ Archivo CSV generado correctamente")
-        
-        # Archivo final JSON
+
         if args.module in ["all"] and success:
             log("🏁 GENERANDO ARCHIVO FINAL JSON")
             if not generate_final_json():
@@ -1068,23 +817,21 @@ def main():
                 success = False
             else:
                 log("✅ Archivo final JSON generado correctamente")
-        
+
         if success:
             log("🎉 PROCESO COMPLETADO EXITOSAMENTE")
             print("\n✅ Todos los módulos se ejecutaron correctamente")
-            print("📊 Los archivos están listos para GitHub Actions y FTP")
+            print("📊 Archivos listos para Actions y FTPS")
         else:
             log("❌ PROCESO COMPLETADO CON ERRORES")
-            print("\n⚠️  Algunos módulos tuvieron errores")
-            print("📋 Revisa los logs para más detalles")
-        
+            print("\n⚠️ Algunos módulos tuvieron errores. Revisa logs.")
+
         return success
-        
     except Exception as e:
         log(f"❌ ERROR CRÍTICO DURANTE LA EJECUCIÓN: {e}")
         traceback.print_exc()
         return False
 
 if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+    ok = main()
+    sys.exit(0 if ok else 1)
