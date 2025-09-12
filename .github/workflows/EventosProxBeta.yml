@@ -163,34 +163,64 @@ jobs:
 
           echo "Subiendo a ${FTP_SERVER}${FTP_REMOTE_DIR}/Competiciones/ListadoEventos/Workflows/"
 
-          upload_file() {
-            local file="$1"
-            local remote_name="$2"
+          upload_with_lftp () {
+            local file="$1"; local remote_name="$2"
+            lftp -u "${FTP_USERNAME},${FTP_PASSWORD}" "${FTP_SERVER}" -e "
+              set cmd:fail-exit true;
+              set net:timeout 120;
+              set net:max-retries 10;
+              set net:persist-retries 10;
+              set net:reconnect-interval-base 5;
+              set net:reconnect-interval-max 30;
+              set ftp:ssl-force true;
+              set ftp:ssl-protect-data true;
+              set ftp:ssl-allow true;
+              set ftp:ssl-session-reuse no;
+              set ftp:passive-mode true;
+              set ftp:prefer-epsv true;
+              set ftp:use-feat true;
+              set dns:order \"inet\";
+              cd '${FTP_REMOTE_DIR}/Competiciones/ListadoEventos/Workflows';
+              put '${file}' -o '${remote_name}';
+              bye"
+          }
+
+          upload_with_curl () {
+            # Fallback FTPS explícito con curl
+            local file="$1"; local remote_name="$2"
+            curl --fail --silent --show-error \
+                 --ftp-ssl --ssl-reqd --ftp-method nocwd \
+                 --connect-timeout 30 --max-time 300 --retry 5 --retry-delay 5 \
+                 --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
+                 -T "${file}" \
+                 "ftps://${FTP_SERVER}${FTP_REMOTE_DIR}/Competiciones/ListadoEventos/Workflows/${remote_name}"
+          }
+
+          upload_file () {
+            local file="$1"; local remote_name="$2"
             echo "Subiendo: $file -> $remote_name"
+
+            # Intentos con lftp
             for attempt in {1..3}; do
-              echo "Intento $attempt de 3..."
-              if lftp -u "${FTP_USERNAME},${FTP_PASSWORD}" "${FTP_SERVER}" -e " \
-                set cmd:fail-exit true; \
-                set net:timeout 60; \
-                set net:max-retries 2; \
-                set ftp:ssl-force true; \
-                set ftp:ssl-protect-data true; \
-                set ftp:passive-mode true; \
-                set ftp:prefer-epsv false; \
-                set ssl:verify-certificate no; \
-                cd '${FTP_REMOTE_DIR}/Competiciones/ListadoEventos/Workflows'; \
-                put '$file' -o '$remote_name'; \
-                echo 'Subido: $remote_name'; \
-                bye"; then
-                echo "✅ $remote_name subido exitosamente"
+              echo "lftp intento $attempt/3..."
+              if upload_with_lftp "$file" "$remote_name"; then
+                echo "✅ $remote_name subido con lftp"
                 return 0
               else
-                echo "⚠️ Falló intento $attempt, reintentando en 5 segundos..."
+                echo "⚠️ lftp falló (intento $attempt), reintento en 5s..."
                 sleep 5
               fi
             done
-            echo "❌ Error: No se pudo subir $remote_name después de 3 intentos"
-            return 1
+
+            # Fallback con curl
+            echo "↪️  Probando fallback con curl FTPS..."
+            if upload_with_curl "$file" "$remote_name"; then
+              echo "✅ $remote_name subido con curl (fallback)"
+              return 0
+            else
+              echo "❌ Fallback curl también falló para $remote_name"
+              return 1
+            fi
           }
 
           upload_file "$F01" "01events_last.json"
@@ -200,7 +230,6 @@ jobs:
           upload_file "$F03" "participantes_procesado_${TS}.csv"
           upload_file "$F04" "participants_completos_final_last.json"
           upload_file "$F04" "participants_completos_final_${TS}.json"
-
           echo "✅ Todos los archivos subidos exitosamente a Competiciones/ListadoEventos/Workflows/"
 
       - name: (Verify) lista archivos remotos
