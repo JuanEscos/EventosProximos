@@ -843,7 +843,7 @@ def generate_final_json():
     log("=== GENERANDO ARCHIVO JSON FINAL ===")
     
     # Buscar archivos más recientes
-    event_files = glob(os.path.join(OUT_DIR, "01events_*.json"))
+    event_files = glob(os.path.join(OUT_DIR, "01events_*.json")
     detailed_files = glob(os.path.join(OUT_DIR, "02competiciones_detalladas_*.json"))
     participant_files = glob(os.path.join(OUT_DIR, "03todos_participantes_*.json"))
     
@@ -898,6 +898,11 @@ def generate_final_json():
     print(f"📊 Eventos básicos: {len(events)}")
     print(f"📊 Eventos con info detallada: {len(detailed_events)}")
     print(f"📊 Total participantes: {len(all_participants)}")
+    
+    # Calcular total de participantes desde eventos detallados
+    if detailed_events:
+        total_participants_from_events = sum(event.get('numero_participantes', 0) for event in detailed_events)
+        print(f"📊 Total participantes (desde eventos): {total_participants_from_events}")
     
     # Verificar archivos generados
     print(f"\n📁 ARCHIVOS GENERADOS:")
