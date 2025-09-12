@@ -611,12 +611,18 @@ def generate_final_json():
 # ============================== MÓDULO 3: EXTRACCIÓN DE PARTICIPANTES ==============================
 
 def extract_participants():
-    """Extraer información detallada de participantes de cada evento"""
+    """Extraer información detallada de participantes usando técnicas del script original"""
     if not HAS_SELENIUM:
         log("Error: Selenium no está instalado")
         return None
     
     log("=== MÓDULO 3: EXTRACCIÓN DE PARTICIPANTES ===")
+    
+    # Importar componentes de Selenium necesarios
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException
     
     # Buscar el archivo de eventos detallados más reciente
     detailed_files = glob(os.path.join(OUT_DIR, "02competiciones_detalladas_*.json"))
@@ -632,7 +638,7 @@ def extract_participants():
     
     log(f"✅ Cargados {len(events)} eventos detallados desde {latest_detailed_file}")
     
-    driver = _get_driver(headless=HEADLESS)
+    driver = _get_driver(headless=False)  # headless=False para ver el proceso
     if not driver:
         log("❌ No se pudo crear el driver de Chrome")
         return None
@@ -650,7 +656,8 @@ def extract_participants():
                 if 'enlaces' in event and 'participantes' in event['enlaces']:
                     participants_url = event['enlaces']['participantes']
                     
-                    log(f"Procesando participantes {i}/{len(events)}: {event.get('nombre', 'Sin nombre')}")
+                    log(f"📋 Procesando participantes {i}/{len(events)}: {event.get('nombre', 'Sin nombre')}")
+                    log(f"   URL: {participants_url}")
                     
                     # Navegar a la página de participantes
                     driver.get(participants_url)
@@ -658,10 +665,10 @@ def extract_participants():
                         EC.presence_of_element_located((By.TAG_NAME, "body"))
                     )
                     
-                    slow_pause(2, 3)
+                    slow_pause(3, 5)
                     
                     # Extraer información detallada de participantes
-                    participants_data = _extract_detailed_participants(driver, participants_url, event)
+                    participants_data = _extract_detailed_participants_selenium(driver, participants_url, event)
                     
                     if participants_data:
                         events_with_participants += 1
@@ -679,7 +686,7 @@ def extract_participants():
                 else:
                     log(f"Evento {i} no tiene enlace de participantes")
                 
-                slow_pause(1, 2)  # Pausa entre solicitudes
+                slow_pause(2, 3)  # Pausa entre eventos
                 
             except Exception as e:
                 log(f"❌ Error procesando participantes del evento {i}: {str(e)}")
@@ -695,6 +702,9 @@ def extract_participants():
             
             log(f"✅ Total de {len(all_participants)} participantes guardados en {output_file}")
             log(f"✅ {events_with_participants} eventos con participantes procesados")
+            
+            # Generar CSV inmediatamente después
+            generate_csv_output()
         else:
             log("⚠️  No se encontraron participantes en ningún evento")
         
@@ -710,172 +720,237 @@ def extract_participants():
         except:
             pass
 
-def _extract_detailed_participants(driver, participants_url, event):
-    """Extraer información detallada de participantes usando técnicas del script original"""
+def _extract_detailed_participants_selenium(driver, participants_url, event):
+    """Extraer información detallada de participantes usando Selenium como en el script original"""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    
+    participants = []
+    
     try:
-        # Obtener HTML de la página
-        page_html = driver.page_source
-        soup = BeautifulSoup(page_html, 'html.parser')
+        # Esperar a que cargue la página de participantes
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
         
-        participants = []
+        # Buscar botones de "Ver detalles" o elementos clickables
+        detail_buttons = driver.find_elements(By.CSS_SELECTOR, "[phx-click^='booking_details_'], [onclick*='details'], .btn-details, button")
         
-        # Buscar todos los elementos que contienen información de participantes
-        participant_containers = soup.find_all('div', class_=lambda x: x and 'participant' in str(x).lower())
+        log(f"  Encontrados {len(detail_buttons)} botones/interacciones posibles")
         
-        if not participant_containers:
-            # Fallback: buscar por estructura de tabla o grid
-            participant_containers = soup.find_all(['tr', 'div'], class_=lambda x: x and any(word in str(x).lower() for word in ['row', 'item', 'entry', 'competitor']))
-        
-        for container in participant_containers:
-            try:
-                participant_data = {
-                    'participants_url': participants_url,
-                    'BinomID': '',
-                    'Dorsal': '',
-                    'Guía': '',
-                    'Perro': '',
-                    'Raza': '',
-                    'Edad': '',
-                    'Género': '',
-                    'Altura (cm)': '',
-                    'Nombre de Pedigree': '',
-                    'País': 'No disponible',
-                    'Licencia': '',
-                    'Club': '',
-                    'Federación': '',
-                    'Equipo': 'No disponible',
-                    'event_uuid': event.get('id', ''),
-                    'event_title': event.get('nombre', 'N/D')
-                }
-                
-                # Extraer información básica
-                text_content = _clean(container.get_text())
-                
-                # Buscar dorsal (normalmente números al inicio)
-                dorsal_match = re.search(r'^\s*(\d+)\s', text_content)
-                if dorsal_match:
-                    participant_data['Dorsal'] = dorsal_match.group(1)
-                
-                # Buscar información específica por patrones
-                lines = [line.strip() for line in text_content.split('\n') if line.strip()]
-                
-                for line in lines:
-                    line_lower = line.lower()
-                    
-                    # Guía (normalmente contiene nombre de persona)
-                    if not participant_data['Guía'] and any(keyword in line_lower for keyword in ['guía', 'guia', 'handler', 'manejador']):
-                        participant_data['Guía'] = line
-                    elif not participant_data['Guía'] and re.match(r'^[A-ZÁÉÍÓÚÜ][a-záéíóúü]+\s+[A-ZÁÉÍÓÚÜ][a-záéíóúü]+$', line):
-                        participant_data['Guía'] = line
-                    
-                    # Perro
-                    if not participant_data['Perro'] and any(keyword in line_lower for keyword in ['perro', 'dog', 'can']):
-                        participant_data['Perro'] = line
-                    
-                    # Raza
-                    if not participant_data['Raza'] and any(breed in line_lower for breed in ['border', 'collie', 'pastor', 'labrador', 'shepherd', 'water dog', 'retriever']):
-                        participant_data['Raza'] = line
-                    
-                    # Edad
-                    if not participant_data['Edad'] and any(keyword in line_lower for keyword in ['años', 'years', 'edad', 'age']):
-                        participant_data['Edad'] = line
-                    
-                    # Género
-                    if not participant_data['Género'] and any(keyword in line_lower for keyword in ['hembra', 'macho', 'female', 'male']):
-                        participant_data['Género'] = line
-                    
-                    # Altura
-                    if not participant_data['Altura (cm)'] and ('cm' in line_lower or 'altura' in line_lower):
-                        participant_data['Altura (cm)'] = line
-                    
-                    # Licencia
-                    if not participant_data['Licencia'] and any(keyword in line_lower for keyword in ['licencia', 'license', 'lic']):
-                        participant_data['Licencia'] = line
-                    
-                    # Club
-                    if not participant_data['Club'] and any(keyword in line_lower for keyword in ['club', 'team', 'equipo']):
-                        participant_data['Club'] = line
-                    
-                    # Federación
-                    if not participant_data['Federación'] and any(keyword in line_lower for keyword in ['federación', 'federacion', 'federation', 'rsce', 'rfec']):
-                        participant_data['Federación'] = line
-                
-                # Generar ID único para el binomio
-                if participant_data['Guía'] and participant_data['Perro']:
-                    participant_data['BinomID'] = f"{participant_data['Guía']}_{participant_data['Perro']}".replace(' ', '_').lower()
-                
-                # Buscar información de mangas/días
-                schedule_data = _extract_schedule_info(container)
-                for i in range(1, 7):
-                    participant_data[f'Día {i}'] = schedule_data.get(f'dia_{i}', '')
-                    participant_data[f'Fecha {i}'] = schedule_data.get(f'fecha_{i}', '')
-                    participant_data[f'Mangas {i}'] = schedule_data.get(f'mangas_{i}', '')
-                
-                participants.append(participant_data)
-                
-            except Exception as e:
-                log(f"Error procesando participante individual: {e}")
-                continue
+        # Si no encontramos botones específicos, buscar tablas o listas de participantes
+        if not detail_buttons:
+            log("  ⚠️  No se encontraron botones de detalles, buscando información directa...")
+            participants = _extract_participants_from_direct_info(driver, participants_url, event)
+        else:
+            # Intentar hacer clic en cada botón para extraer información
+            for i, button in enumerate(detail_buttons[:10]):  # Limitar para prueba
+                try:
+                    participant_data = _extract_participant_from_button(driver, button, participants_url, event)
+                    if participant_data:
+                        participants.append(participant_data)
+                        log(f"    ✅ Participante {len(participants)} extraído")
+                except Exception as e:
+                    log(f"    ❌ Error en botón {i+1}: {e}")
+                    continue
         
         return participants
         
     except Exception as e:
-        log(f"Error en extracción detallada de participantes: {e}")
+        log(f"Error en extracción Selenium: {e}")
         return []
 
-def _extract_schedule_info(container):
-    """Extraer información de horarios y mangas"""
-    schedule_data = {}
-    
+def _extract_participant_from_button(driver, button, participants_url, event):
+    """Extraer información de un participante haciendo clic en su botón"""
     try:
-        # Buscar elementos relacionados con fechas y mangas
-        schedule_elements = container.find_all(['div', 'span'], class_=lambda x: x and any(word in str(x).lower() for word in ['day', 'dia', 'date', 'fecha', 'manga', 'round']))
+        # Hacer clic en el botón
+        driver.execute_script("arguments[0].click();", button)
+        slow_pause(1, 2)
         
-        days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
-        current_day = 1
+        # Buscar el modal o panel de detalles que se abre
+        modal = driver.find_elements(By.CSS_SELECTOR, ".modal-content, .details-panel, [role='dialog']")
         
-        for element in schedule_elements:
-            text = _clean(element.get_text())
-            if not text:
-                continue
+        if modal:
+            # Extraer información del modal
+            participant_data = _extract_from_modal(modal[0], participants_url, event)
+            # Cerrar el modal
+            close_buttons = driver.find_elements(By.CSS_SELECTOR, ".close, [aria-label='Close'], .btn-close")
+            if close_buttons:
+                driver.execute_script("arguments[0].click();", close_buttons[0])
             
-            # Detectar días
-            for i, day in enumerate(days, 1):
-                if day.lower() in text.lower():
-                    schedule_data[f'dia_{current_day}'] = day
-                    current_day += 1
-                    break
-            
-            # Detectar fechas (patrones de fecha)
-            date_patterns = [
-                r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b',
-                r'\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b',
-                r'\b\d{1,2}\s+de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b'
-            ]
-            
-            for pattern in date_patterns:
-                matches = re.findall(pattern, text, re.IGNORECASE)
-                for match in matches:
-                    schedule_data[f'fecha_{current_day}'] = match
-                    break
-            
-            # Detectar mangas (G1, G2, G3, etc.)
-            manga_patterns = [
-                r'\bG\d+\s*/\s*[A-Z]+\b',
-                r'\b(?:Grado|Grade)\s*\d+\b',
-                r'\b(?:PRE|PROM|COMP|ROOKIES)\b'
-            ]
-            
-            for pattern in manga_patterns:
-                matches = re.findall(pattern, text, re.IGNORECASE)
-                for match in matches:
-                    schedule_data[f'mangas_{current_day}'] = match
-                    break
+            return participant_data
+        
+        return None
         
     except Exception as e:
-        log(f"Error extrayendo información de horarios: {e}")
+        log(f"Error extrayendo de botón: {e}")
+        return None
+
+def _extract_from_modal(modal_element, participants_url, event):
+    """Extraer información del modal de detalles"""
+    participant_data = {
+        'participants_url': participants_url,
+        'BinomID': '',
+        'Dorsal': '',
+        'Guía': '',
+        'Perro': '',
+        'Raza': '',
+        'Edad': '',
+        'Género': '',
+        'Altura (cm)': '',
+        'Nombre de Pedigree': '',
+        'País': 'No disponible',
+        'Licencia': '',
+        'Club': '',
+        'Federación': '',
+        'Equipo': 'No disponible',
+        'event_uuid': event.get('id', ''),
+        'event_title': event.get('nombre', 'N/D')
+    }
     
-    return schedule_data
+    try:
+        # Obtener todo el texto del modal
+        modal_text = modal_element.text
+        
+        # Extraer información usando patrones (similar al script original)
+        lines = [line.strip() for line in modal_text.split('\n') if line.strip()]
+        
+        for line in lines:
+            # Dorsal
+            if not participant_data['Dorsal'] and re.match(r'^\d+$', line):
+                participant_data['Dorsal'] = line
+            
+            # Guía (nombres con apellidos)
+            if not participant_data['Guía'] and re.match(r'^[A-ZÁÉÍÓÚÜ][a-záéíóúü]+\s+[A-ZÁÉÍÓÚÜ][a-záéíóúü]+$', line):
+                participant_data['Guía'] = line
+            
+            # Perro (palabras en mayúsculas o mixed case)
+            if not participant_data['Perro'] and re.match(r'^[A-ZÁÉÍÓÚÜ][a-zA-ZÁÉÍÓÚÜáéíóúü]+$', line):
+                participant_data['Perro'] = line
+            
+            # Información específica con labels
+            if ':' in line:
+                parts = line.split(':', 1)
+                key = parts[0].strip().lower()
+                value = parts[1].strip()
+                
+                if 'guía' in key or 'handler' in key:
+                    participant_data['Guía'] = value
+                elif 'perro' in key or 'dog' in key:
+                    participant_data['Perro'] = value
+                elif 'raza' in key or 'breed' in key:
+                    participant_data['Raza'] = value
+                elif 'edad' in key or 'age' in key:
+                    participant_data['Edad'] = value
+                elif 'género' in key or 'gender' in key or 'sex' in key:
+                    participant_data['Género'] = value
+                elif 'altura' in key or 'height' in key:
+                    participant_data['Altura (cm)'] = value
+                elif 'licencia' in key or 'license' in key:
+                    participant_data['Licencia'] = value
+                elif 'club' in key:
+                    participant_data['Club'] = value
+                elif 'federación' in key or 'federation' in key:
+                    participant_data['Federación'] = value
+        
+        # Generar BinomID
+        if participant_data['Guía'] and participant_data['Perro']:
+            participant_data['BinomID'] = f"{participant_data['Guía']}_{participant_data['Perro']}".replace(' ', '_').lower()
+        
+        return participant_data
+        
+    except Exception as e:
+        log(f"Error extrayendo del modal: {e}")
+        return participant_data
+
+def _extract_participants_from_direct_info(driver, participants_url, event):
+    """Extraer información de participantes directamente de la página (fallback)"""
+    participants = []
+    
+    try:
+        # Obtener todo el texto de la página
+        page_text = driver.find_element(By.TAG_NAME, "body").text
+        lines = [line.strip() for line in page_text.split('\n') if line.strip()]
+        
+        # Buscar secciones que parezcan contener información de participantes
+        participant_lines = []
+        current_section = []
+        
+        for line in lines:
+            if re.match(r'^\d+\.', line) or re.match(r'^\d+\s', line) or any(keyword in line.lower() for keyword in ['dorsal', 'guía', 'perro', 'handler']):
+                if current_section:
+                    participant_lines.append(current_section)
+                current_section = [line]
+            elif current_section:
+                current_section.append(line)
+        
+        if current_section:
+            participant_lines.append(current_section)
+        
+        # Procesar cada sección de participante
+        for section in participant_lines:
+            participant_data = _parse_participant_section(section, participants_url, event)
+            if participant_data:
+                participants.append(participant_data)
+        
+        return participants
+        
+    except Exception as e:
+        log(f"Error en extracción directa: {e}")
+        return []
+
+def _parse_participant_section(section_lines, participants_url, event):
+    """Parsear una sección de texto para extraer información de participante"""
+    participant_data = {
+        'participants_url': participants_url,
+        'BinomID': '',
+        'Dorsal': '',
+        'Guía': '',
+        'Perro': '',
+        'Raza': '',
+        'Edad': '',
+        'Género': '',
+        'Altura (cm)': '',
+        'Nombre de Pedigree': '',
+        'País': 'No disponible',
+        'Licencia': '',
+        'Club': '',
+        'Federación': '',
+        'Equipo': 'No disponible',
+        'event_uuid': event.get('id', ''),
+        'event_title': event.get('nombre', 'N/D')
+    }
+    
+    try:
+        section_text = ' '.join(section_lines)
+        
+        # Buscar dorsal (número al inicio)
+        dorsal_match = re.search(r'^(\d+)', section_lines[0] if section_lines else '')
+        if dorsal_match:
+            participant_data['Dorsal'] = dorsal_match.group(1)
+        
+        # Buscar nombre de guía (patrón nombre + apellido)
+        for line in section_lines:
+            if re.match(r'^[A-ZÁÉÍÓÚÜ][a-záéíóúü]+\s+[A-ZÁÉÍÓÚÜ][a-záéíóúü]+$', line):
+                participant_data['Guía'] = line
+                break
+        
+        # Buscar nombre de perro (palabra en mayúsculas o título)
+        for line in section_lines:
+            if re.match(r'^[A-ZÁÉÍÓÚÜ][a-zA-ZÁÉÍÓÚÜáéíóúü]{3,}$', line) and line != participant_data['Guía']:
+                participant_data['Perro'] = line
+                break
+        
+        # Generar BinomID
+        if participant_data['Guía'] and participant_data['Perro']:
+            participant_data['BinomID'] = f"{participant_data['Guía']}_{participant_data['Perro']}".replace(' ', '_').lower()
+        
+        return participant_data
+        
+    except Exception as e:
+        log(f"Error parseando sección: {e}")
+        return None
 
 # ============================== MÓDULO 4: GENERACIÓN DE ARCHIVOS FINALES ==============================
 
@@ -899,14 +974,14 @@ def generate_csv_output():
         log("⚠️  No hay participantes para procesar")
         return False
     
-    # Definir campos para el CSV
+    # Definir campos para el CSV (exactamente como los necesitas)
     fieldnames = [
         'participants_url', 'BinomID', 'Dorsal', 'Guía', 'Perro', 'Raza', 'Edad', 
         'Género', 'Altura (cm)', 'Nombre de Pedigree', 'País', 'Licencia', 'Club', 
         'Federación', 'Equipo', 'event_uuid', 'event_title'
     ]
     
-    # Añadir campos de días/mangas
+    # Añadir campos de días/mangas (Día 1-6, Fecha 1-6, Mangas 1-6)
     for i in range(1, 7):
         fieldnames.extend([f'Día {i}', f'Fecha {i}', f'Mangas {i}'])
     
@@ -919,8 +994,13 @@ def generate_csv_output():
         writer.writeheader()
         
         for participant in participants:
-            # Asegurar que todos los campos existan
-            row = {field: participant.get(field, '') for field in fieldnames}
+            # Asegurar que todos los campos existan y reemplazar NaN/None por ''
+            row = {}
+            for field in fieldnames:
+                value = participant.get(field, '')
+                if value is None or (isinstance(value, float) and np.isnan(value)):
+                    value = ''
+                row[field] = value
             writer.writerow(row)
     
     log(f"✅ Archivo CSV generado: {csv_file}")
@@ -929,16 +1009,83 @@ def generate_csv_output():
     if participants:
         first_participant = participants[0]
         print(f"\n📋 EJEMPLO DE PARTICIPANTE EXTRAÍDO:")
-        print(f"   Guía: {first_participant.get('Guía', 'N/A')}")
-        print(f"   Perro: {first_participant.get('Perro', 'N/A')}")
-        print(f"   Dorsal: {first_participant.get('Dorsal', 'N/A')}")
-        print(f"   Club: {first_participant.get('Club', 'N/A')}")
-        for i in range(1, 4):
-            if first_participant.get(f'Mangas {i}'):
-                print(f"   Mangas {i}: {first_participant.get(f'Mangas {i}')}")
+        for field in ['Guía', 'Perro', 'Dorsal', 'Club', 'Raza']:
+            value = first_participant.get(field, 'N/A')
+            if value:
+                print(f"   {field}: {value}")
     
     return True
-
+def generate_final_json():
+    """Generar el archivo JSON final unificado"""
+    log("=== GENERANDO ARCHIVO JSON FINAL ===")
+    
+    # Buscar archivos más recientes
+    event_files = glob(os.path.join(OUT_DIR, "01events_*.json"))
+    detailed_files = glob(os.path.join(OUT_DIR, "02competiciones_detalladas_*.json"))
+    participant_files = glob(os.path.join(OUT_DIR, "03todos_participantes_*.json"))
+    
+    if not event_files:
+        log("❌ No se encontraron archivos de eventos")
+        return False
+    
+    # Cargar eventos
+    latest_event_file = max(event_files, key=os.path.getctime)
+    with open(latest_event_file, 'r', encoding='utf-8') as f:
+        events = json.load(f)
+    
+    # Cargar información detallada si existe
+    detailed_events = []
+    if detailed_files:
+        latest_detailed_file = max(detailed_files, key=os.path.getctime)
+        with open(latest_detailed_file, 'r', encoding='utf-8') as f:
+            detailed_events = json.load(f)
+    
+    # Cargar participantes si existen
+    all_participants = []
+    if participant_files:
+        latest_participant_file = max(participant_files, key=os.path.getctime)
+        with open(latest_participant_file, 'r', encoding='utf-8') as f:
+            all_participants = json.load(f)
+    
+    # Crear estructura final
+    final_data = {
+        'metadata': {
+            'fecha_generacion': datetime.now().isoformat(),
+            'total_eventos': len(events),
+            'total_eventos_detallados': len(detailed_events),
+            'total_participantes': len(all_participants),
+            'version': '1.0'
+        },
+        'eventos': events,
+        'eventos_detallados': detailed_events,
+        'participantes': all_participants
+    }
+    
+    # Guardar archivo final
+    final_file = os.path.join(OUT_DIR, "participants_completos_final.json")
+    with open(final_file, 'w', encoding='utf-8') as f:
+        json.dump(final_data, f, ensure_ascii=False, indent=2)
+    
+    log(f"✅ Archivo final JSON generado: {final_file}")
+    
+    # Resumen final
+    print(f"\n{'='*80}")
+    print("RESUMEN FINAL DEL PROCESO:")
+    print(f"{'='*80}")
+    print(f"📊 Eventos básicos: {len(events)}")
+    print(f"📊 Eventos con info detallada: {len(detailed_events)}")
+    print(f"📊 Total participantes: {len(all_participants)}")
+    
+    # Verificar archivos generados
+    print(f"\n📁 ARCHIVOS GENERADOS:")
+    output_files = glob(os.path.join(OUT_DIR, "*"))
+    for file in sorted(output_files):
+        size = os.path.getsize(file)
+        print(f"   {os.path.basename(file)} - {size} bytes")
+    
+    print(f"\n{'='*80}")
+    
+    return True
 # ============================== FUNCIÓN PRINCIPAL ==============================
 
 def main():
