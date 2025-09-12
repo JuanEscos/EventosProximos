@@ -784,16 +784,13 @@ def generate_csv_output():
     participant_files = glob(os.path.join(OUT_DIR, "03todos_participantes_*.json"))
     if not participant_files:
         log("❌ No se encontraron archivos de participantes")
-        return False
-    
-    latest_participant_file = max(participant_files, key=os.path.getctime)
-    
-    # Cargar participantes
-    with open(latest_participant_file, 'r', encoding='utf-8') as f:
-        participants = json.load(f)
-    
-    if not participants:
-        log("⚠️  No hay participantes para procesar")
+        
+        # DEBUG: Mostrar qué archivos sí existen
+        log("📁 Archivos en directorio output:")
+        all_files = glob(os.path.join(OUT_DIR, "*"))
+        for file in all_files:
+            log(f"   {os.path.basename(file)}")
+        
         return False
     
     # Definir campos para el CSV (exactamente como los necesitas)
@@ -914,7 +911,43 @@ def generate_final_json():
     print(f"\n{'='*80}")
     
     return True
+#!/bin/bash
 
+    #!/bin/bash
+
+    echo '=== VERIFICANDO ARCHIVOS REQUERIDOS ==='
+    
+    required_files=("01events_*.json" "02competiciones_detalladas_*.json" "participantes_procesado_*.csv" "participants_completos_final.json")
+    missing_files=0
+    
+    for pattern in "${required_files[@]}"; do
+        # Buscar archivos que coincidan con el patrón
+        files=$(ls ./output/$pattern 2>/dev/null || true)
+        
+        if [ -n "$files" ]; then
+            # Tomar el archivo más reciente
+            latest_file=$(ls -t ./output/$pattern 2>/dev/null | head -1)
+            if [ -n "$latest_file" ] && [ -f "$latest_file" ]; then
+                file_info=$(ls -la "$latest_file")
+                echo "✅ $pattern: ENCONTRADO ($file_info)"
+            else
+                echo "❌ $pattern: NO ENCONTRADO"
+                missing_files=$((missing_files + 1))
+            fi
+        else
+            echo "❌ $pattern: NO ENCONTRADO"
+            missing_files=$((missing_files + 1))
+        fi
+    done
+    
+    echo "=== RESUMEN ==="
+    if [ $missing_files -eq 0 ]; then
+        echo "✅ TODOS los archivos requeridos están presentes"
+        exit 0
+    else
+        echo "❌ Faltan $missing_files archivos requeridos"
+        exit 1
+    fi
 # ============================== FUNCIÓN PRINCIPAL ==============================
 
 def main():
