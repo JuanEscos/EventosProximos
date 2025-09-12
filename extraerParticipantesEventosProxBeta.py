@@ -158,10 +158,67 @@ def _clean(s: str) -> str:
     s = re.sub(r"[ \t]+", " ", s)
     return s.strip(" \t\r\n-•*·:;")
 
+def _parse_event_dates(date_string):
+    """Parsear fechas de eventos y calcular días restantes"""
+    if not date_string:
+        return None, None, None, None
+    
+    try:
+        today = datetime.now().date()
+        
+        # Patrones comunes de fechas en eventos
+        patterns = [
+            # Sep 5 - 7
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d+)\s*-\s*(\d+)',
+            # 05/06/07 Septiembre
+            r'(\d+)[/\-](\d+)[/\-](\d+)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)',
+            # 5 y 6 septiembre
+            r'(\d+)\s+y\s+(\d+)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, date_string, re.IGNORECASE)
+            if match:
+                if len(match.groups()) == 3:
+                    # Formato: Sep 5 - 7
+                    month_str, start_day, end_day = match.groups()
+                    month_num = _month_to_number(month_str)
+                    if month_num:
+                        start_date = datetime(today.year, month_num, int(start_day)).date()
+                        # Si el evento ya pasó este año, verificar si es del próximo año
+                        if start_date < today:
+                            start_date = datetime(today.year + 1, month_num, int(start_day)).date()
+                        return start_date, None, (start_date - today).days, f"{start_day} {month_str} - {end_day} {month_str}"
+                
+                elif len(match.groups()) == 4:
+                    # Formato: 05/06/07 Septiembre
+                    day1, day2, day3, month_str = match.groups()
+                    month_num = _month_to_number(month_str)
+                    if month_num:
+                        start_date = datetime(today.year, month_num, int(day1)).date()
+                        if start_date < today:
+                            start_date = datetime(today.year + 1, month_num, int(day1)).date()
+                        return start_date, None, (start_date - today).days, f"{day1}/{day2}/{day3} {month_str}"
+        
+        # Si no podemos parsear, devolver valores por defecto
+        return None, None, None, date_string
+        
+    except Exception as e:
+        log(f"Error parseando fechas '{date_string}': {e}")
+        return None, None, None, date_string
+
+def _month_to_number(month_str):
+    """Convertir nombre de mes a número"""
+    months = {
+        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+        'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+    }
+    return months.get(month_str.lower()[:3], None)
+
 # ============================== FUNCIONES DE NAVEGACIÓN ==============================
 
-def _get_driver(headless=True):
-    """Crea y configura el driver de Selenium"""
+def _get_driver(headless=True, unique_id=""):
+    """Crea y configura el driver de Selenium con directorio único"""
     if not HAS_SELENIUM:
         raise ImportError("Selenium no está instalado")
     
@@ -175,6 +232,11 @@ def _get_driver(headless=True):
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    # Directorio de usuario único para evitar conflictos
+    if unique_id:
+        user_data_dir = f"/tmp/chrome_profile_{unique_id}_{int(time.time())}"
+        opts.add_argument(f"--user-data-dir={user_data_dir}")
     
     try:
         if HAS_WEBDRIVER_MANAGER:
@@ -296,7 +358,7 @@ def extract_events():
     
     log("=== MÓDULO 1: EXTRACCIÓN DE EVENTOS BÁSICOS ===")
     
-    driver = _get_driver(headless=HEADLESS)
+    driver = _get_driver(headless=HEADLESS, unique_id="module1")
     if not driver:
         log("❌ No se pudo crear el driver de Chrome")
         return None
@@ -418,6 +480,13 @@ def extract_events():
                 else:
                     event_data['pais_bandera'] = '🇪🇸'  # Valor por defecto
                 
+                # Parsear fechas y calcular días restantes
+                start_date, end_date, dias_restantes, fecha_formateada = _parse_event_dates(event_data.get('fechas', ''))
+                event_data['fecha_inicio'] = start_date.isoformat() if start_date else None
+                event_data['fecha_fin'] = end_date.isoformat() if end_date else None
+                event_data['dias_restantes'] = dias_restantes
+                event_data['fecha_formateada'] = fecha_formateada
+                
                 events.append(event_data)
                 log(f"✅ Evento {i} procesado: {event_data.get('nombre', 'Sin nombre')}")
                 
@@ -443,6 +512,7 @@ def extract_events():
             print(f"\nEvento: {event.get('nombre', 'N/A')}")
             print(f"  Club: {event.get('club', 'No extraído')}")
             print(f"  Lugar: {event.get('lugar', 'No extraído')}")
+            print(f"  Días restantes: {event.get('dias_restantes', 'N/A')}")
             print(f"  Enlace participantes: {event.get('enlaces', {}).get('participantes', 'No extraído')}")
         print(f"\n{'='*80}")
         
@@ -462,7 +532,7 @@ def extract_events():
 # ============================== MÓDULO 2: INFORMACIÓN DETALLADA ==============================
 
 def extract_detailed_info():
-    """Extraer información detallada de cada evento"""
+    """Extraer información detallada de cada evento incluyendo número de participantes"""
     if not HAS_SELENIUM:
         log("Error: Selenium no está instalado")
         return None
@@ -483,7 +553,7 @@ def extract_detailed_info():
     
     log(f"✅ Cargados {len(events)} eventos desde {latest_event_file}")
     
-    driver = _get_driver(headless=HEADLESS)
+    driver = _get_driver(headless=HEADLESS, unique_id="module2")
     if not driver:
         log("❌ No se pudo crear el driver de Chrome")
         return None
@@ -497,8 +567,12 @@ def extract_detailed_info():
         for i, event in enumerate(events, 1):
             try:
                 # PRESERVAR CAMPOS ORIGINALES IMPORTANTES
-                preserved_fields = ['id', 'nombre', 'fechas', 'organizacion', 'club', 'lugar', 'enlaces', 'pais_bandera']
+                preserved_fields = ['id', 'nombre', 'fechas', 'organizacion', 'club', 'lugar', 'enlaces', 'pais_bandera', 'fecha_inicio', 'fecha_fin', 'dias_restantes', 'fecha_formateada']
                 detailed_event = {field: event.get(field, '') for field in preserved_fields}
+                
+                # Inicializar contador de participantes
+                detailed_event['num_participantes'] = 0
+                detailed_event['participantes_info'] = {}
                 
                 # Verificar si tiene enlace de información
                 if 'enlaces' in event and 'info' in event['enlaces']:
@@ -551,11 +625,40 @@ def extract_detailed_info():
                     
                     # Añadir información adicional al evento
                     detailed_event['informacion_adicional'] = additional_info
-                    detailed_event['timestamp_extraccion'] = datetime.now().isoformat()
                     
                 else:
                     log(f"Evento {i} no tiene enlace de información, usando datos básicos")
                 
+                # ===== EXTRAER NÚMERO DE PARTICIPANTES =====
+                if 'enlaces' in event and 'participantes' in event['enlaces']:
+                    participants_url = event['enlaces']['participantes']
+                    log(f"  📊 Extrayendo número de participantes de: {participants_url}")
+                    
+                    try:
+                        # Navegar a la página de participantes
+                        driver.get(participants_url)
+                        WebDriverWait(driver, 15).until(
+                            EC.presence_of_element_located((By.TAG_NAME, "body"))
+                        )
+                        
+                        slow_pause(2, 3)
+                        
+                        # Extraer número de participantes usando diferentes métodos
+                        num_participants = _extract_participants_count(driver)
+                        detailed_event['num_participantes'] = num_participants
+                        detailed_event['participantes_info'] = {
+                            'url': participants_url,
+                            'timestamp_consulta': datetime.now().isoformat(),
+                            'metodo_extraccion': 'contador_pagina'
+                        }
+                        
+                        log(f"  ✅ Encontrados {num_participants} participantes")
+                        
+                    except Exception as e:
+                        log(f"  ❌ Error extrayendo participantes: {e}")
+                        detailed_event['participantes_info']['error'] = str(e)
+                
+                detailed_event['timestamp_extraccion'] = datetime.now().isoformat()
                 detailed_events.append(detailed_event)
                 slow_pause(1, 2)  # Pausa entre solicitudes
                 
@@ -572,6 +675,27 @@ def extract_detailed_info():
             json.dump(detailed_events, f, ensure_ascii=False, indent=2)
         
         log(f"✅ Información detallada guardada en {output_file}")
+        
+        # Mostrar resumen de participantes
+        total_participants = sum(event.get('num_participantes', 0) for event in detailed_events)
+        events_with_participants = sum(1 for event in detailed_events if event.get('num_participantes', 0) > 0)
+        
+        print(f"\n{'='*80}")
+        print("RESUMEN DE PARTICIPANTES EXTRAÍDOS:")
+        print(f"{'='*80}")
+        print(f"📊 Total eventos procesados: {len(detailed_events)}")
+        print(f"📊 Eventos con participantes: {events_with_participants}")
+        print(f"📊 Total participantes encontrados: {total_participants}")
+        
+        # Mostrar top 5 eventos con más participantes
+        events_sorted = sorted(detailed_events, key=lambda x: x.get('num_participantes', 0), reverse=True)
+        print(f"\n🏆 TOP 5 EVENTOS CON MÁS PARTICIPANTES:")
+        for i, event in enumerate(events_sorted[:5], 1):
+            if event.get('num_participantes', 0) > 0:
+                print(f"  {i}. {event.get('nombre', 'N/A')}: {event.get('num_participantes', 0)} participantes")
+        
+        print(f"{'='*80}")
+        
         return detailed_events
         
     except Exception as e:
@@ -583,6 +707,55 @@ def extract_detailed_info():
             driver.quit()
         except:
             pass
+
+def _extract_participants_count(driver):
+    """Extraer el número de participantes de la página usando múltiples métodos"""
+    from selenium.webdriver.common.by import By
+    
+    try:
+        # Método 1: Buscar contadores específicos en la página
+        count_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'participante') or contains(text(), 'inscrito') or contains(text(), 'competidor')]")
+        
+        for element in count_elements:
+            text = element.text.lower()
+            # Buscar patrones como "X participantes", "Total: Y", etc.
+            patterns = [
+                r'(\d+)\s*participantes?',
+                r'(\d+)\s*inscritos?',
+                r'(\d+)\s*competidores?',
+                r'total[:\s]*(\d+)',
+                r'count[:\s]*(\d+)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, text)
+                if match:
+                    return int(match.group(1))
+        
+        # Método 2: Buscar elementos de lista o tabla
+        participant_items = driver.find_elements(By.CSS_SELECTOR, "tr, .participant, .competitor, .booking-item, [data-participant]")
+        if participant_items:
+            return len(participant_items)
+        
+        # Método 3: Buscar en toda la página
+        page_text = driver.find_element(By.TAG_NAME, "body").text
+        numbers = re.findall(r'\b(\d+)\s*participantes?\b', page_text, re.IGNORECASE)
+        if numbers:
+            return max(map(int, numbers))
+        
+        # Método 4: Buscar cualquier número que pueda ser un contador
+        all_numbers = re.findall(r'\b\d+\b', page_text)
+        if all_numbers:
+            # Filtrar números que podrían ser contadores (no años, no dorsales pequeños)
+            possible_counts = [int(n) for n in all_numbers if 5 < int(n) < 1000]
+            if possible_counts:
+                return max(possible_counts)
+        
+        return 0
+        
+    except Exception as e:
+        log(f"Error en conteo de participantes: {e}")
+        return 0
 
 # ============================== MÓDULO 3: EXTRACCIÓN DE PARTICIPANTES ==============================
 
