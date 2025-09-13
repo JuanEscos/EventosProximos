@@ -1,0 +1,115 @@
+name: EventosProxMod1_2
+
+on:
+  schedule:
+    - cron: '1 4 * * *'  # Ejecutar diariamente a las 04:01 UTC
+  workflow_dispatch:  # Permitir ejecución manual
+
+jobs:
+  scrape-and-process:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Madrid
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        cache-dependency-path: requirements.txt
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Create output directory
+      run: mkdir -p ./output
+
+    - name: Run Python scraper
+      run: python ./extraerParticipantesEventosProxBeta.py --module all
+
+    - name: Verify generated files
+      run: |
+        echo '=== VERIFICANDO ARCHIVOS GENERADOS ==='
+        
+        # Verificar que los archivos principales existen
+        required_files=("01events.json" "02info.json")
+        missing_files=0
+        
+        for file in "${required_files[@]}"; do
+            if [ -f "./output/$file" ]; then
+                file_info=$(ls -la "./output/$file")
+                echo "✅ $file: ENCONTRADO ($file_info)"
+            else
+                echo "❌ $file: NO ENCONTRADO"
+                missing_files=$((missing_files + 1))
+            fi
+        done
+        
+        # Mostrar todos los archivos en output para debugging
+        echo "=== ARCHIVOS EN ./output/ ==="
+        ls -la ./output/ || echo "No se puede acceder al directorio ./output/"
+        
+        if [ $missing_files -eq 0 ]; then
+            echo "✅ TODOS los archivos requeridos están presentes"
+        else
+            echo "❌ Faltan $missing_files archivos requeridos"
+            exit 1
+        fi
+
+    - name: Upload to FTP
+      env:
+        FTP_SERVER: ${{ secrets.FTP_SERVER }}
+        FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+        FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+        FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
+      run: |
+        echo '=== SUBIENDO ARCHIVOS POR FTP ==='
+        
+        # Directorio remoto destino
+        REMOTE_DIR="${FTP_REMOTE_DIR}/Competiciones/ListadoEventos"
+        BASE_URL="ftp://${FTP_SERVER}${REMOTE_DIR}"
+        
+        # Archivos a subir
+        FILES_TO_UPLOAD=("01events.json" "02info.json")
+        
+        # Crear directorio remoto si no existe
+        echo "Creando directorio remoto: ${REMOTE_DIR}"
+        curl --fail --ssl-reqd --disable-epsv --ftp-skip-pasv-ip \
+             --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
+             --quote "MKD ${REMOTE_DIR}" \
+             "ftp://${FTP_SERVER}/" || true
+        
+        # Subir cada archivo
+        for file in "${FILES_TO_UPLOAD[@]}"; do
+            local_file="./output/$file"
+            if [ -f "$local_file" ]; then
+                echo "Subiendo: $file -> ${REMOTE_DIR}/"
+                curl --fail --ssl-reqd --disable-epsv --ftp-skip-pasv-ip \
+                     --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
+                     --upload-file "$local_file" \
+                     "${BASE_URL}/$file"
+                
+                # Verificar que se subió correctamente
+                echo "Verificando subida de $file..."
+                curl --fail --ssl-reqd --disable-epsv --ftp-skip-pasv-ip \
+                     --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
+                     --list-only "${BASE_URL}/" | grep "$file" && echo "✅ $file subido correctamente"
+            else
+                echo "⚠️  Archivo $file no encontrado, saltando..."
+            fi
+        done
+
+    - name: Upload artifacts (backup)
+      uses: actions/upload-artifact@v4
+      with:
+        name: flowagility-data-backup
+        path: |
+          ./output/01events.json
+          ./output/02info.json
+        retention-days: 3
