@@ -222,7 +222,7 @@ except Exception as e:
     print(f"❌ Error cargando .env: {e}")
 
 # Credenciales
-FLOW_EMAIL = os.getenv("FLOW_EMAIL", "pilar1959suarez@gmail.com")
+FLOW_EMAIL = os.getenv("FLOW_EMAIL", "rosaperez1134@yahoo.com")
 FLOW_PASS = os.getenv("FLOW_PASS", "Seattle1")
 
 # Flags/tunables
