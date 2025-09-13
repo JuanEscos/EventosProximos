@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TZ: Europe/Madrid
+      HEADLESS: "true"
+      MAX_SCROLLS: "15"
+      SCROLL_WAIT_S: "3.0"
     
     steps:
     - name: Checkout code
@@ -22,7 +25,12 @@ jobs:
         cache: 'pip'
         cache-dependency-path: requirements.txt
 
-    - name: Install dependencies
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y chromium-browser chromium-chromedriver lftp
+
+    - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
@@ -31,7 +39,11 @@ jobs:
       run: mkdir -p ./output
 
     - name: Run Python scraper
-      run: python ./extraerParticipantesEventosProxBeta.py --module all
+      timeout-minutes: 30  # Aumentar timeout
+      run: |
+        echo "=== EJECUTANDO SCRAPER ==="
+        python ./extraerParticipantesEventosProxBeta.py --module all
+        echo "=== SCRAPER COMPLETADO ==="
 
     - name: Verify generated files
       run: |
@@ -140,5 +152,8 @@ jobs:
         echo "=== DEBUGGING FAILURE ==="
         echo "Listando archivos en output:"
         ls -la ./output/ 2>/dev/null || echo "No output directory"
-        echo "=== ULTIMOS LOGS ==="
-        tail -50 /home/runner/work/_temp/*.log 2>/dev/null || echo "No logs found"
+        echo "=== ÚLTIMOS 100 CARACTERES DE LOG ==="
+        tail -c 100 /home/runner/work/_temp/*.log 2>/dev/null || echo "No logs found"
+        echo "=== VERIFICANDO CHROME ==="
+        which google-chrome-stable || echo "Chrome no encontrado"
+        which chromedriver || echo "Chromedriver no encontrado"
