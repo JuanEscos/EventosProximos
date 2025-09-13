@@ -37,9 +37,30 @@ jobs:
       run: |
         echo '=== VERIFICANDO ARCHIVOS GENERADOS ==='
         
-        # Verificar que los archivos principales existen
-        required_files=("01events.json" "02info.json")
+        # Buscar archivos más recientes con fecha y crear enlaces fijos
+        events_file=$(find ./output -name "01events_*.json" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -f2- -d" ")
+        info_file=$(find ./output -name "02info_*.json" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -f2- -d" ")
+        
         missing_files=0
+        
+        if [ -n "$events_file" ] && [ -f "$events_file" ]; then
+            cp "$events_file" "./output/01events.json"
+            echo "✅ 01events.json creado desde: $(basename $events_file)"
+        else
+            echo "❌ No se encontró archivo de eventos"
+            missing_files=$((missing_files + 1))
+        fi
+        
+        if [ -n "$info_file" ] && [ -f "$info_file" ]; then
+            cp "$info_file" "./output/02info.json"
+            echo "✅ 02info.json creado desde: $(basename $info_file)"
+        else
+            echo "❌ No se encontró archivo de info"
+            missing_files=$((missing_files + 1))
+        fi
+        
+        # Verificar que existen los archivos finales
+        required_files=("01events.json" "02info.json")
         
         for file in "${required_files[@]}"; do
             if [ -f "./output/$file" ]; then
@@ -75,31 +96,30 @@ jobs:
         REMOTE_DIR="${FTP_REMOTE_DIR}/Competiciones/ListadoEventos"
         BASE_URL="ftp://${FTP_SERVER}${REMOTE_DIR}"
         
+        echo "Subiendo a: ${BASE_URL}"
+        
         # Archivos a subir
         FILES_TO_UPLOAD=("01events.json" "02info.json")
-        
-        # Crear directorio remoto si no existe
-        echo "Creando directorio remoto: ${REMOTE_DIR}"
-        curl --fail --ssl-reqd --disable-epsv --ftp-skip-pasv-ip \
-             --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
-             --quote "MKD ${REMOTE_DIR}" \
-             "ftp://${FTP_SERVER}/" || true
         
         # Subir cada archivo
         for file in "${FILES_TO_UPLOAD[@]}"; do
             local_file="./output/$file"
             if [ -f "$local_file" ]; then
-                echo "Subiendo: $file -> ${REMOTE_DIR}/"
-                curl --fail --ssl-reqd --disable-epsv --ftp-skip-pasv-ip \
-                     --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
-                     --upload-file "$local_file" \
-                     "${BASE_URL}/$file"
+                echo "Subiendo: $file"
                 
-                # Verificar que se subió correctamente
-                echo "Verificando subida de $file..."
-                curl --fail --ssl-reqd --disable-epsv --ftp-skip-pasv-ip \
-                     --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
-                     --list-only "${BASE_URL}/" | grep "$file" && echo "✅ $file subido correctamente"
+                # Usar lftp para mejor manejo de FTP
+                lftp -e "
+                  set ftp:ssl-allow no;
+                  set net:timeout 30;
+                  set net:max-retries 3;
+                  set net:reconnect-interval-base 5;
+                  mkdir -p ${REMOTE_DIR};
+                  cd ${REMOTE_DIR};
+                  put ${local_file};
+                  bye;
+                " -u "${FTP_USERNAME}","${FTP_PASSWORD}" "${FTP_SERVER}"
+                
+                echo "✅ $file subido correctamente"
             else
                 echo "⚠️  Archivo $file no encontrado, saltando..."
             fi
@@ -113,3 +133,12 @@ jobs:
           ./output/01events.json
           ./output/02info.json
         retention-days: 3
+
+    - name: Debug on failure
+      if: failure()
+      run: |
+        echo "=== DEBUGGING FAILURE ==="
+        echo "Listando archivos en output:"
+        ls -la ./output/ 2>/dev/null || echo "No output directory"
+        echo "=== ULTIMOS LOGS ==="
+        tail -50 /home/runner/work/_temp/*.log 2>/dev/null || echo "No logs found"
