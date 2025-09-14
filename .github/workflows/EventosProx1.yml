@@ -120,7 +120,7 @@ jobs:
         fi
         
         # Directorio remoto
-        REMOTE_DIR="${FTP_REMOTE_DIR}/Competiciones/ListadoEventos"
+        REMOTE_DIR="${FTP_REMOTE_DIR}/Competiciones/EventosProx/Flow/data"
         BASE_URL="ftp://${FTP_SERVER}${REMOTE_DIR}"
         
         echo "Subiendo a: ${BASE_URL}/"
