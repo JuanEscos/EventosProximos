@@ -28,7 +28,7 @@ jobs:
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y chromium-browser chromium-chromedriver lftp
+        sudo apt-get install -y chromium-browser chromium-chromedriver curl
 
     - name: Install Python dependencies
       run: |
@@ -39,7 +39,7 @@ jobs:
       run: mkdir -p ./output
 
     - name: Run Python scraper
-      timeout-minutes: 30  # Aumentar timeout
+      timeout-minutes: 30
       run: |
         echo "=== EJECUTANDO SCRAPER ==="
         python ./extraerParticipantesEventosProxBeta.py --module all
@@ -76,8 +76,8 @@ jobs:
         
         for file in "${required_files[@]}"; do
             if [ -f "./output/$file" ]; then
-                file_info=$(ls -la "./output/$file")
-                echo "✅ $file: ENCONTRADO ($file_info)"
+                file_size=$(stat -c%s "./output/$file")
+                echo "✅ $file: ENCONTRADO (${file_size} bytes)"
             else
                 echo "❌ $file: NO ENCONTRADO"
                 missing_files=$((missing_files + 1))
@@ -95,47 +95,132 @@ jobs:
             exit 1
         fi
 
-    - name: Upload to FTP
+    - name: Debug FTP configuration
+      run: |
+        echo "=== CONFIGURACIÓN FTP ==="
+        echo "FTP_SERVER: ${FTP_SERVER:+(configurado)}"
+        echo "FTP_USERNAME: ${FTP_USERNAME:+(configurado)}"
+        echo "FTP_PASSWORD: ${FTP_PASSWORD:+(configurado)}"
+        echo "FTP_REMOTE_DIR: ${FTP_REMOTE_DIR:+(configurado)}"
+        echo "=== VERIFICANDO CONEXIÓN FTP ==="
+
+    - name: Upload to FTP using curl
       env:
         FTP_SERVER: ${{ secrets.FTP_SERVER }}
         FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
         FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
         FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
       run: |
-        echo '=== SUBIENDO ARCHIVOS POR FTP ==='
+        echo '=== SUBIENDO ARCHIVOS POR FTP (usando curl) ==='
         
-        # Directorio remoto destino
+        # Verificar que las variables estén configuradas
+        if [ -z "$FTP_SERVER" ] || [ -z "$FTP_USERNAME" ] || [ -z "$FTP_PASSWORD" ]; then
+            echo "❌ ERROR: Variables FTP no configuradas correctamente"
+            echo "FTP_SERVER: $FTP_SERVER"
+            echo "FTP_USERNAME: $FTP_USERNAME"
+            echo "FTP_PASSWORD: ${FTP_PASSWORD:+(configurada)}"
+            exit 1
+        fi
+        
+        # Directorio remoto
         REMOTE_DIR="${FTP_REMOTE_DIR}/Competiciones/ListadoEventos"
-        BASE_URL="ftp://${FTP_SERVER}${REMOTE_DIR}"
-        
-        echo "Subiendo a: ${BASE_URL}"
+        echo "Subiendo a: ftp://$FTP_SERVER$REMOTE_DIR/"
         
         # Archivos a subir
-        FILES_TO_UPLOAD=("01events.json" "02info.json")
+        FILES=("01events.json" "02info.json")
+        
+        # Configuración de reintentos
+        MAX_RETRIES=3
+        RETRY_DELAY=10
+        
+        # Función para subir un archivo
+        upload_file() {
+            local file="$1"
+            local local_file="./output/$file"
+            local remote_url="ftp://$FTP_SERVER$REMOTE_DIR/$file"
+            
+            echo "📤 Subiendo: $file"
+            echo "   Local: $local_file"
+            echo "   Remoto: $remote_url"
+            
+            # Verificar que el archivo local existe
+            if [ ! -f "$local_file" ]; then
+                echo "❌ ERROR: Archivo local no encontrado: $local_file"
+                return 1
+            fi
+            
+            # Intentar subida con múltiples reintentos
+            for attempt in $(seq 1 $MAX_RETRIES); do
+                echo "   Intento $attempt/$MAX_RETRIES..."
+                
+                # Subir archivo con curl
+                curl --ftp-create-dirs \
+                     --user "$FTP_USERNAME:$FTP_PASSWORD" \
+                     --upload-file "$local_file" \
+                     "$remote_url" \
+                     --connect-timeout 30 \
+                     --max-time 120 \
+                     --retry 2 \
+                     --retry-delay 5 \
+                     --fail \
+                     --show-error \
+                     --verbose
+                
+                CURL_EXIT_CODE=$?
+                
+                if [ $CURL_EXIT_CODE -eq 0 ]; then
+                    echo "✅ $file subido exitosamente (intento $attempt)"
+                    return 0
+                else
+                    echo "❌ Error en intento $attempt (código: $CURL_EXIT_CODE)"
+                    
+                    if [ $attempt -lt $MAX_RETRIES ]; then
+                        echo "⏳ Esperando $RETRY_DELAY segundos antes de reintentar..."
+                        sleep $RETRY_DELAY
+                    fi
+                fi
+            done
+            
+            echo "❌ Todos los intentos fallaron para $file"
+            return 1
+        }
+        
+        # Probar conexión básica al FTP
+        echo "🧪 Probando conexión FTP..."
+        timeout 20 curl --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            "ftp://$FTP_SERVER/" \
+            --connect-timeout 15 \
+            --max-time 20 \
+            --silent \
+            --list-only \
+            --fail
+        
+        if [ $? -eq 0 ]; then
+            echo "✅ Conexión FTP exitosa"
+        else
+            echo "⚠️  No se pudo listar directorio raíz, continuando igual..."
+        fi
         
         # Subir cada archivo
-        for file in "${FILES_TO_UPLOAD[@]}"; do
-            local_file="./output/$file"
-            if [ -f "$local_file" ]; then
-                echo "Subiendo: $file"
-                
-                # Usar lftp para mejor manejo de FTP
-                lftp -e "
-                  set ftp:ssl-allow no;
-                  set net:timeout 30;
-                  set net:max-retries 3;
-                  set net:reconnect-interval-base 5;
-                  mkdir -p ${REMOTE_DIR};
-                  cd ${REMOTE_DIR};
-                  put ${local_file};
-                  bye;
-                " -u "${FTP_USERNAME}","${FTP_PASSWORD}" "${FTP_SERVER}"
-                
-                echo "✅ $file subido correctamente"
-            else
-                echo "⚠️  Archivo $file no encontrado, saltando..."
+        ALL_SUCCESS=true
+        for file in "${FILES[@]}"; do
+            if ! upload_file "$file"; then
+                ALL_SUCCESS=false
+                echo "❌ Error crítico subiendo $file"
             fi
+            echo ""
         done
+        
+        # Verificar resultado final
+        if [ "$ALL_SUCCESS" = true ]; then
+            echo "🎉 TODOS los archivos subidos exitosamente"
+            echo "📍 Ubicación: ftp://$FTP_SERVER$REMOTE_DIR/"
+        else
+            echo "❌ Algunos archivos fallaron al subir"
+            echo "=== ESTADO FINAL ==="
+            echo "Revisa las configuraciones FTP en GitHub Secrets"
+            exit 1
+        fi
 
     - name: Upload artifacts (backup)
       uses: actions/upload-artifact@v4
@@ -152,8 +237,10 @@ jobs:
         echo "=== DEBUGGING FAILURE ==="
         echo "Listando archivos en output:"
         ls -la ./output/ 2>/dev/null || echo "No output directory"
-        echo "=== ÚLTIMOS 100 CARACTERES DE LOG ==="
-        tail -c 100 /home/runner/work/_temp/*.log 2>/dev/null || echo "No logs found"
-        echo "=== VERIFICANDO CHROME ==="
-        which google-chrome-stable || echo "Chrome no encontrado"
-        which chromedriver || echo "Chromedriver no encontrado"
+        echo "=== VARIABLES FTP (solo nombres) ==="
+        echo "FTP_SERVER: ${FTP_SERVER:+(set)}"
+        echo "FTP_USERNAME: ${FTP_USERNAME:+(set)}"
+        echo "FTP_PASSWORD: ${FTP_PASSWORD:+(set)}"
+        echo "FTP_REMOTE_DIR: ${FTP_REMOTE_DIR:+(set)}"
+        echo "=== ÚLTIMOS LOGS ==="
+        tail -20 /home/runner/work/_temp/*.log 2>/dev/null || echo "No logs found"
