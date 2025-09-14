@@ -302,32 +302,41 @@ def _get_driver(headless=True):
     opts.add_experimental_option('useAutomationExtension', False)
     
     try:
-        # USAR CHROMEDRIVER DEL SISTEMA EN LUGAR DE WEBDRIVER-MANAGER
-        # Esto evita el error "Exec format error"
+        # USAR CHROME Y CHROMEDRIVER INSTALADOS CORRECTAMENTE
+        # Ruta correcta de Chrome en Ubuntu
         opts.binary_location = "/usr/bin/google-chrome-stable"
-        service = Service(executable_path="/usr/bin/chromedriver")
+        
+        # Buscar chromedriver en varias ubicaciones posibles
+        chromedriver_paths = [
+            "/usr/local/bin/chromedriver",
+            "/usr/bin/chromedriver",
+            "/snap/bin/chromedriver"
+        ]
+        
+        chromedriver_path = None
+        for path in chromedriver_paths:
+            if os.path.exists(path):
+                chromedriver_path = path
+                break
+        
+        if not chromedriver_path:
+            raise Exception("No se encontró chromedriver en las rutas esperadas")
+        
+        service = Service(executable_path=chromedriver_path)
         driver = webdriver.Chrome(service=service, options=opts)
         
         # Ejecutar script para evitar detección
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
-        driver.set_page_load_timeout(90)  # Aumentar timeout
+        driver.set_page_load_timeout(90)
         driver.implicitly_wait(30)
         return driver
         
     except Exception as e:
         log(f"Error creando driver: {e}")
-        log("Intentando con webdriver-manager como fallback...")
-        
-        # Fallback a webdriver-manager si falla la opción del sistema
-        try:
-            if HAS_WEBDRIVER_MANAGER:
-                service = Service(ChromeDriverManager().install())
-                driver = webdriver.Chrome(service=service, options=opts)
-                return driver
-        except Exception as fallback_error:
-            log(f"Error en fallback también: {fallback_error}")
-        
+        log("Traceback completo:")
+        import traceback
+        traceback.print_exc()
         return None
 
 def _login(driver):
