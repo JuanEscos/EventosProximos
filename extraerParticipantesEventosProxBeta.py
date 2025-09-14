@@ -302,14 +302,11 @@ def _get_driver(headless=True):
     opts.add_experimental_option('useAutomationExtension', False)
     
     try:
-        if HAS_WEBDRIVER_MANAGER:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=opts)
-        else:
-            # Para GitHub Actions, usar chrome preinstalado
-            opts.binary_location = "/usr/bin/google-chrome-stable"
-            service = Service(executable_path="/usr/bin/chromedriver")
-            driver = webdriver.Chrome(service=service, options=opts)
+        # USAR CHROMEDRIVER DEL SISTEMA EN LUGAR DE WEBDRIVER-MANAGER
+        # Esto evita el error "Exec format error"
+        opts.binary_location = "/usr/bin/google-chrome-stable"
+        service = Service(executable_path="/usr/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=opts)
         
         # Ejecutar script para evitar detección
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -320,6 +317,17 @@ def _get_driver(headless=True):
         
     except Exception as e:
         log(f"Error creando driver: {e}")
+        log("Intentando con webdriver-manager como fallback...")
+        
+        # Fallback a webdriver-manager si falla la opción del sistema
+        try:
+            if HAS_WEBDRIVER_MANAGER:
+                service = Service(ChromeDriverManager().install())
+                driver = webdriver.Chrome(service=service, options=opts)
+                return driver
+        except Exception as fallback_error:
+            log(f"Error en fallback también: {fallback_error}")
+        
         return None
 
 def _login(driver):
