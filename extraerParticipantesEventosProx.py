@@ -692,6 +692,49 @@ def extract_events():
 
 # ============================== MÓDULO 2: INFORMACIÓN DETALLADA ==============================
 
+def _extract_description(soup, max_length=800):
+    """Extrae y limpia la descripción, limitando el tamaño"""
+    try:
+        # Buscar descripción en múltiples lugares
+        description_selectors = [
+            'div[class*="description"]',
+            'div[class*="descripcion"]',
+            'div[class*="info"]',
+            'div[class*="content"]',
+            'div[class*="text"]',
+            'div[class*="body"]'
+        ]
+        
+        description_text = ""
+        for selector in description_selectors:
+            try:
+                elem = soup.select_one(selector)
+                if elem:
+                    text = _clean(elem.get_text())
+                    if text and len(text) > 50:  # Texto significativo
+                        description_text = text
+                        break
+            except:
+                continue
+        
+        # Si no encontramos con selectores, buscar por contenido
+        if not description_text:
+            all_text = soup.get_text()
+            lines = all_text.split('\n')
+            meaningful_lines = [line.strip() for line in lines if len(line.strip()) > 50]
+            if meaningful_lines:
+                description_text = ' '.join(meaningful_lines[:3])  # Primeras 3 líneas significativas
+        
+        # Limitar tamaño
+        if description_text and len(description_text) > max_length:
+            description_text = description_text[:max_length] + "... [texto truncado]"
+        
+        return description_text
+        
+    except Exception as e:
+        log(f"Error extrayendo descripción: {e}")
+        return ""
+
 def _count_participants_correctly(soup):
     """Contar número de participantes REALES usando métodos específicos para FlowAgility"""
     try:
@@ -846,10 +889,10 @@ def extract_detailed_info():
                         if title_elem:
                             additional_info['titulo_completo'] = _clean(title_elem.get_text())
                         
-                        # Extraer descripción si existe
-                        description_elem = soup.find('div', class_=lambda x: x and any(word in str(x).lower() for word in ['description', 'descripcion', 'info']))
-                        if description_elem:
-                            additional_info['descripcion'] = _clean(description_elem.get_text())
+                        # Extraer descripción limitada (máximo 800 caracteres)
+                        description_text = _extract_description(soup, max_length=800)
+                        if description_text:
+                            additional_info['descripcion'] = description_text
                         
                         # Añadir información adicional al evento
                         detailed_event['informacion_adicional'] = additional_info
