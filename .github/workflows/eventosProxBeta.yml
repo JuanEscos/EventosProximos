@@ -1,4 +1,4 @@
-- name: Compress JSON files for FTP Beta
+- name: Compress JSON files for FTP2
   run: |
     echo "=== COMPRIMIENDO ARCHIVOS PARA FTP ==="
     
