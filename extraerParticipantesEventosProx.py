@@ -692,7 +692,7 @@ def extract_events():
 
 # ============================== MÓDULO 2: INFORMACIÓN DETALLADA ==============================
 
-def _extract_description(soup, max_length=800):
+def _extract_description(soup, max_length=2000):
     """Extrae y limpia la descripción, limitando el tamaño"""
     try:
         # Buscar descripción en múltiples lugares
