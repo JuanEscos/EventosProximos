@@ -692,6 +692,8 @@ def extract_events():
 
 # ============================== MÓDULO 2: INFORMACIÓN DETALLADA ==============================
 
+import re
+
 def _extract_description(soup, max_length=2000):
     """Extrae y limpia la descripción, limitando el tamaño"""
     try:
@@ -704,7 +706,7 @@ def _extract_description(soup, max_length=2000):
             'div[class*="text"]',
             'div[class*="body"]'
         ]
-        
+
         description_text = ""
         for selector in description_selectors:
             try:
@@ -716,7 +718,7 @@ def _extract_description(soup, max_length=2000):
                         break
             except:
                 continue
-        
+
         # Si no encontramos con selectores, buscar por contenido
         if not description_text:
             all_text = soup.get_text()
@@ -724,81 +726,26 @@ def _extract_description(soup, max_length=2000):
             meaningful_lines = [line.strip() for line in lines if len(line.strip()) > 50]
             if meaningful_lines:
                 description_text = ' '.join(meaningful_lines[:3])  # Primeras 3 líneas significativas
-        
+
+        # --- SECCIÓN AÑADIDA ---
+        # Unificar múltiples saltos de línea en uno solo
+        if description_text:
+            # El patrón r'\n+' busca uno o más caracteres de salto de línea consecutivos
+            description_text = re.sub(r'\n+', '\n', description_text)
+            # También puedes considerar limpiar espacios extra
+            description_text = description_text.strip()
+            
+        # --- FIN SECCIÓN AÑADIDA ---
+
         # Limitar tamaño
         if description_text and len(description_text) > max_length:
             description_text = description_text[:max_length] + "... [texto truncado]"
-        
+
         return description_text
         
     except Exception as e:
         log(f"Error extrayendo descripción: {e}")
         return ""
-
-def _count_participants_correctly(soup):
-    """Contar número de participantes REALES usando métodos específicos para FlowAgility"""
-    try:
-        # Método 1: Buscar botones de detalles de participantes (enfoque principal)
-        detail_buttons = soup.find_all(attrs={'phx-click': lambda x: x and 'booking_details' in x})
-        if detail_buttons:
-            return len(detail_buttons)
-        
-        # Método 2: Buscar elementos con booking_id
-        booking_elements = soup.find_all(attrs={'phx-value-booking_id': True})
-        if booking_elements:
-            return len(booking_elements)
-        
-        # Método 3: Buscar por clases específicas de FlowAgility
-        participant_classes = [
-            '[class*="participant"]',
-            '[class*="competitor"]',
-            '[class*="booking"]',
-            '[class*="inscrito"]'
-        ]
-        
-        for class_selector in participant_classes:
-            elements = soup.select(class_selector)
-            if elements and 1 <= len(elements) <= 200:  # Rango razonable
-                return len(elements)
-        
-        # Método 4: Buscar en tablas
-        tables = soup.find_all('table')
-        for table in tables:
-            rows = table.find_all('tr')
-            # Si la tabla tiene más de 1 fila y parece ser de participantes
-            if len(rows) > 1:
-                first_row_text = rows[0].get_text().lower()
-                if any(keyword in first_row_text for keyword in ['dorsal', 'guía', 'perro', 'nombre']):
-                    return len(rows) - 1  # Restar la fila de encabezados
-                return len(rows)
-        
-        # Método 5: Buscar texto que indique número de participantes
-        page_text = soup.get_text().lower()
-        count_patterns = [
-            r'(\d+)\s*participantes?',
-            r'(\d+)\s*inscritos?',
-            r'(\d+)\s*competidores?',
-            r'total:\s*(\d+)',
-            r'inscripciones:\s*(\d+)'
-        ]
-        
-        for pattern in count_patterns:
-            match = re.search(pattern, page_text)
-            if match:
-                count = int(match.group(1))
-                if 1 <= count <= 200:  # Rango válido
-                    return count
-        
-        # Método 6: Si la página indica que no hay participantes
-        if any(phrase in page_text for phrase in ['no hay participantes', 'sin participantes', 'no participants', 'empty', '0 participantes']):
-            return 0
-        
-        # Si no encontramos nada, devolver 0 en lugar de un número incorrecto
-        return 0
-        
-    except Exception as e:
-        log(f"Error contando participantes: {e}")
-        return 0
 
 def extract_detailed_info():
     """Extraer información detallada de cada evento incluyendo número de participantes"""
