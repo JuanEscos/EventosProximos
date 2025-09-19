@@ -75,7 +75,7 @@ jobs:
       timeout-minutes: 30
       run: |
         echo "=== EJECUTANDO SCRAPER ==="
-        python ./EventosProxBeta.py --module all
+        python ./EventosProxconParticipantes.py --module all
         echo "=== SCRAPER COMPLETADO ==="
 
     - name: Verify generated files
