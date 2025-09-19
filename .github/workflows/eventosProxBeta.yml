@@ -72,7 +72,14 @@ jobs:
       run: mkdir -p ./output
 
     - name: Run Python scraper
-      timeout-minutes: 30
+      timeout-minutes: 90
+      env:
+         TZ: Europe/Madrid
+         HEADLESS: "true"
+         MAX_SCROLLS: "12"         # baja un poco
+         SCROLL_WAIT_S: "2.0"
+         LIMIT_EVENTS: "35"        # procesa solo 35 eventos por run
+         MAX_RUNTIME_MIN: "25"     # parachute: cortar de forma ordenada a los 25'
       run: |
         echo "=== EJECUTANDO SCRAPER ==="
         python ./EventosProxconParticipantes.py --module all
