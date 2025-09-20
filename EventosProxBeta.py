@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Sep 20 14:00:10 2025
+
+@author: Juan
+"""
+
 
 """
 FLOWAGILITY SCRAPER - EXTRACCIÓN DE EVENTOS E INFORMACIÓN DETALLADA
@@ -799,6 +806,93 @@ def _count_participants_correctly(soup):
     except Exception as e:
         log(f"Error contando participantes: {e}")
         return 0
+def _wait_liveview_ready(driver, hard_timeout=25):
+    """Espera a que LiveView haya hidratado el DOM (html.phx-connected o [data-phx-root] poblado)."""
+    try:
+        WebDriverWait(driver, hard_timeout).until(
+            lambda d: (
+                "phx-connected" in d.find_element(By.TAG_NAME, "html").get_attribute("class")
+            ) or d.find_elements(By.CSS_SELECTOR, "[data-phx-root]")
+        )
+        time.sleep(1.0)  # pequeño extra para que pinte listas
+        return True
+    except Exception:
+        return False
+
+
+def _count_participants_liveview(driver, soft_scroll=True) -> int:
+    """
+    Cuenta participantes DIRECTAMENTE en el DOM ya renderizado por LiveView.
+    - Busca booking cards / filas con booking_id.
+    - Deduplica por booking_id.
+    - Fallback a tablas y a chips/resúmenes si es necesario.
+    """
+    _wait_liveview_ready(driver, hard_timeout=25)
+
+    if soft_scroll:
+        try:
+            for _ in range(2):
+                driver.execute_script("window.scrollBy(0, document.body.scrollHeight/2);")
+                time.sleep(0.6)
+        except Exception:
+            pass
+
+    booking_selectors = [
+        "[phx-value-booking_id]",
+        "[data-phx-value-booking_id]",
+        '[phx-click="booking_details"]',
+        "[data-phx-click*=booking_details]",
+        '[id^="booking-"]',
+    ]
+
+    booking_ids = set()
+    for sel in booking_selectors:
+        try:
+            nodes = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in nodes:
+                bid = (
+                    el.get_attribute("phx-value-booking_id")
+                    or el.get_attribute("data-phx-value-booking_id")
+                    or el.get_attribute("id")
+                    or ""
+                )
+                m = re.search(r"(\d{3,})", bid or "")
+                if m:
+                    booking_ids.add(m.group(1))
+        except Exception:
+            continue
+
+    if booking_ids:
+        return len(booking_ids)
+
+    # Fallback: tablas
+    try:
+        tables = driver.find_elements(By.TAG_NAME, "table")
+        for t in tables:
+            rows = t.find_elements(By.TAG_NAME, "tr")
+            if len(rows) > 1:
+                header_text = rows[0].text.lower()
+                if any(k in header_text for k in ["dorsal", "guía", "guia", "perro", "nombre"]):
+                    return max(0, len(rows) - 1)
+                if 5 <= len(rows) <= 500:
+                    return len(rows) - 1
+    except Exception:
+        pass
+
+    # Fallback: chips/resúmenes en texto
+    try:
+        body_txt = driver.find_element(By.TAG_NAME, "body").text.lower()
+        for pat in [r'(\d+)\s*participantes?', r'(\d+)\s*inscritos?', r'(\d+)\s*competidores?', r'total:\s*(\d+)']:
+            m = re.search(pat, body_txt)
+            if m:
+                n = int(m.group(1))
+                if 0 <= n <= 2000:
+                    return n
+    except Exception:
+        pass
+
+    return 0
+
 
 def extract_detailed_info():
     """Extraer información detallada de cada evento incluyendo número de participantes"""
@@ -908,19 +1002,20 @@ def extract_detailed_info():
                     
                     try:
                         # Navegar a la página de participantes
+
                         driver.get(participants_url)
-                        WebDriverWait(driver, 15).until(
-                            EC.presence_of_element_located((By.TAG_NAME, "body"))
-                        )
+                        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAGNAME, "body")))  # o By.TAG_NAME
+                        _wait_liveview_ready(driver, hard_timeout=25)
                         
-                        slow_pause(2, 3)
+                        # Si te redirige a /user/login por sesión caducada, re-login y reintento:
+                        if "/user/login" in (driver.current_url or ""):
+                            log("Sesión caducada; reintentando login…")
+                            if _login(driver):
+                                driver.get(participants_url)
+                                WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                                _wait_liveview_ready(driver, hard_timeout=25)
                         
-                        # Obtener HTML de la página de participantes
-                        participants_html = driver.page_source
-                        participants_soup = BeautifulSoup(participants_html, 'html.parser')
-                        
-                        # Contar participantes con método mejorado
-                        num_participants = _count_participants_correctly(participants_soup)
+                        num_participants = _count_participants_liveview(driver)
                         
                         if num_participants > 0:
                             detailed_event['numero_participantes'] = num_participants
