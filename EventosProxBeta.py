@@ -2,92 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-FLOWAGILITY SCRAPER - EXTRACCIÓN DE EVENTOS E INFORMACIÓN DETALLADA
-FLOWAGILITY SCRAPER - SISTEMA AUTOMATIZADO DE EXTRACCIÓN DE DATOS
-
-🌐 DESCRIPCIÓN DEL PROCESO:
-──────────────────────────────────────────────────────────────────────────────
-Este sistema realiza la extracción automatizada de información de competiciones 
-de agility desde la plataforma FlowAgility.com. El proceso consta de dos etapas
-principales que se ejecutan secuencialmente:
-
-1. 📋 MÓDULO 1: EXTRACCIÓN DE EVENTOS BÁSICOS
-   • Autenticación automática en FlowAgility.com
-   • Navegación a la página principal de eventos
-   • Scroll completo para cargar todos los eventos visibles
-   • Extracción estructurada de información básica:
-     - ID único del evento
-     - Nombre de la competición
-     - Fechas de celebración
-     - Organización (FCI/RSCE, RFEC, etc.)
-     - Club organizador
-     - Lugar/ubicación
-     - Enlaces a información y participantes
-     - Bandera del país
-
-2. 📊 MÓDULO 2: INFORMACIÓN DETALLADA + PARTICIPANTES
-   • Acceso individual a cada página de información de evento
-   • Extracción de datos adicionales y mejora de información
-   • Acceso a páginas de listas de participantes
-   • Conteo preciso del número de participantes por evento
-   • Preservación de datos originales con enriquecimiento
-
-🎯 OBJETIVOS PRINCIPALES:
-• Extraer información completa y estructurada de todas las competiciones
-• Obtener el número real de participantes por evento
-• Generar archivos JSON consistentes para procesos downstream
-• Mantener compatibilidad con sistemas existentes
-
-📁 ARCHIVOS GENERADOS:
-• 01events_YYYY-MM-DD.json       → Eventos básicos (con fecha)
-• 01events.json                  → Eventos básicos (siempre actual)
-• 02info_YYYY-MM-DD.json         → Info detallada + participantes (con fecha)
-• 02info.json                    → Info detallada (siempre actual)
-
-⚙️  CONFIGURACIÓN:
-• Credenciales mediante variables de entorno (.env)
-• Modo headless/visible configurable
-• Pausas aleatorias entre solicitudes
-• Timeouts ajustables para diferentes conexiones
-
-🛡️  CARACTERÍSTICAS TÉCNICAS:
-• Manejo robusto de errores y reintentos
-• Detección y aceptación automática de cookies
-• Scroll completo para carga de contenido dinámico
-• Preservación de datos originales en fallos
-• Logging detallado de cada etapa del proceso
-
-🚦 FLUJO DE EJECUCIÓN:
-1. Inicio de sesión automático
-2. Aceptación de cookies (si es necesario)
-3. Carga completa de página de eventos
-4. Extracción y parsing de HTML
-5. Procesamiento individual por evento
-6. Generación de archivos de salida
-7. Resumen estadístico final
-
-📊 ESTADÍSTICAS CALCULADAS:
-• Total de eventos procesados
-• Eventos con información detallada
-• Eventos con participantes identificados
-• Número total de participantes
-• Ranking de eventos por participación
-
-⚠️  NOTAS IMPORTANTES:
-• Requiere ChromeDriver compatible
-• Necesita credenciales válidas de FlowAgility
-• Las pausas evitan bloqueos por rate limiting
-• Los archivos se sobrescriben en cada ejecución
-
-🔄 USO:
-python flowagility_scraper.py [--module events|info|all]
-"""
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
 FLOWAGILITY SCRAPER - EVENTOS + INFO DETALLADA (con participantes LiveView)
+- Detección rápida de estados (ok/empty/login/timeout)
+- Conteo en DOM vivo (JS) + fallback HTML (BeautifulSoup)
+- Micro-scroll para disparar cargas perezosas
+- Reaceptación de cookies en página de participantes
+- Timeouts: por página, por evento y global
+- Implicit wait MUY bajo (evita cuelgues silenciosos)
 """
 
 import os
@@ -159,7 +80,7 @@ LIMIT_EVENTS   = int(os.getenv("LIMIT_EVENTS", "0"))   # 0 = sin límite
 
 # Budgets/tiempos (ajustables por ENV)
 PER_EVENT_MAX_S      = int(os.getenv("PER_EVENT_MAX_S", "180"))  # límite por evento
-PER_PAGE_MAX_S       = int(os.getenv("PER_PAGE_MAX_S",  "40"))   # espera máx por página de participantes
+PER_PAGE_MAX_S       = int(os.getenv("PER_PAGE_MAX_S",  "35"))   # espera máx por página de participantes
 LIVEVIEW_READY_MAX_S = int(os.getenv("LIVEVIEW_READY_MAX_S", "12"))
 MAX_RUNTIME_MIN      = int(os.getenv("MAX_RUNTIME_MIN", "0"))    # 0 = sin límite global
 
@@ -184,6 +105,7 @@ def _clean(s: str) -> str:
 def _clean_output_directory():
     try:
         files_to_keep = ['config.json', 'settings.ini']
+        os.makedirs(OUT_DIR, exist_ok=True)
         for file in os.listdir(OUT_DIR):
             if file not in files_to_keep:
                 file_path = os.path.join(OUT_DIR, file)
@@ -227,9 +149,14 @@ def _get_driver(headless=True):
     opts.add_argument("--disable-setuid-sandbox")
     opts.add_argument("--ignore-certificate-errors")
     opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    ua = os.getenv("CHROME_UA", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    opts.add_argument(f"--user-agent={ua}")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option('useAutomationExtension', False)
+
+    chrome_bin = os.getenv("CHROME_BIN")
+    if chrome_bin and os.path.exists(chrome_bin):
+        opts.binary_location = chrome_bin
 
     try:
         chromedriver_path = None
@@ -251,7 +178,7 @@ def _get_driver(headless=True):
 
         # Timeouts: explícitos + implicit MUY BAJO (evita micro-cuelgues)
         driver.set_page_load_timeout(75)
-        driver.implicitly_wait(2)
+        driver.implicitly_wait(2)  # 💡 clave para no bloquear cada find_*
         return driver
     except Exception as e:
         log(f"Error creando driver: {e}")
@@ -506,95 +433,122 @@ def _extract_description(soup, max_length=800):
         log(f"Error extrayendo descripción: {e}")
         return ""
 
-# ---- Detección rápida de estado en página de participantes ----
 def _wait_state_participants_page(driver, timeout_s):
     """
-    Estados:
-      - login: redirigido a /user/login
-      - ok: hay nodos de participantes
-      - empty: mensajes de lista vacía
-      - timeout: no determinado
+    Devuelve: "login" | "ok" | "empty" | "timeout"
+    - 'ok' si detectamos nodos/IDs de participantes (sin exigir phx-connected).
+    - 'empty' si hay texto típico de vacío.
+    - 'login' si redirige a /user/login.
     """
     t_end = _deadline(timeout_s)
+    did_scroll = False
     while _now() < t_end:
         url = (driver.current_url or "")
         if "/user/login" in url:
             return "login"
+
+        # 1) Conteo rápido en DOM vivo (sin depender de phx-connected)
         try:
-            html = driver.find_element(By.TAG_NAME, "html")
-            if "phx-connected" in (html.get_attribute("class") or ""):
-                cnt = driver.execute_script("""
-                    return document.querySelectorAll(
-                      '[phx-value-booking_id],'+
-                      '[data-phx-value-booking_id],'+
-                      '[phx-click="booking_details"],'+
-                      '[data-phx-click*="booking_details"],'+
-                      '[id^="booking-"]'
-                    ).length;
-                """) or 0
-                if int(cnt) > 0:
-                    return "ok"
+            cnt = driver.execute_script("""
+                const qs = document.querySelectorAll(
+                  '[phx-value-booking_id],'+
+                  '[phx-value-booking-id],'+
+                  '[data-phx-value-booking_id],'+
+                  '[data-phx-value-booking-id],'+
+                  '[phx-click*="booking_details"],'+
+                  '[data-phx-click*="booking_details"],'+
+                  '[id^="booking-"],[id^="booking_"]'
+                );
+                return qs ? qs.length : 0;
+            """) or 0
+            if int(cnt) > 0:
+                return "ok"
         except Exception:
             pass
+
+        # 2) Texto que indica vacío
         try:
             body_txt = driver.find_element(By.TAG_NAME, "body").text.lower()
             if re.search(r"no hay|sin participantes|no results|0 participantes|no participants", body_txt):
                 return "empty"
         except Exception:
             pass
+
+        # 3) Micro-scroll para disparar lazy/hydrate
+        if not did_scroll:
+            try:
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(0.25)
+                driver.execute_script("window.scrollTo(0, 0);")
+                did_scroll = True
+            except Exception:
+                pass
+
         time.sleep(0.25)
     return "timeout"
 
 def _count_participants_fast(driver) -> int:
-    """Cuenta participants en DOM vivo con JS; fallback a tabla/texto si no hay nodos."""
+    """Cuenta participantes desde el DOM vivo; acepta variantes con guion/underscore y contains en phx-click."""
     try:
-        bids = driver.execute_script("""
+        result = driver.execute_script("""
             const set = new Set();
-            const qs = document.querySelectorAll(
+            const nodes = document.querySelectorAll(
               '[phx-value-booking_id],'+
+              '[phx-value-booking-id],'+
               '[data-phx-value-booking_id],'+
-              '[phx-click="booking_details"],'+
+              '[data-phx-value-booking-id],'+
+              '[phx-click*="booking_details"],'+
               '[data-phx-click*="booking_details"],'+
-              '[id^="booking-"]'
+              '[id^="booking-"],[id^="booking_"]'
             );
-            qs.forEach(n=>{
-              const v = n.getAttribute('phx-value-booking_id') 
-                     || n.getAttribute('data-phx-value-booking_id') 
+            for (const n of nodes) {
+              const v = n.getAttribute('phx-value-booking_id')
+                     || n.getAttribute('phx-value-booking-id')
+                     || n.getAttribute('data-phx-value-booking_id')
+                     || n.getAttribute('data-phx-value-booking-id')
                      || n.id || '';
-              const m = v && v.match(/(\\d{3,})/);
-              if (m) set.add(m[1]);
-            });
-            return Array.from(set);
-        """) or []
-        if bids:
-            return len(bids)
+              if (v) set.add(v);
+            }
+            return set.size || nodes.length || 0;
+        """) or 0
+        if result and int(result) > 0:
+            return int(result)
     except Exception:
         pass
+    return 0
 
-    # Fallback: tablas
+def _count_participants_from_html(html: str) -> int:
+    """Fallback con BeautifulSoup sobre el DOM actual."""
     try:
-        for t in driver.find_elements(By.TAG_NAME, "table"):
-            rows = t.find_elements(By.TAG_NAME, "tr")
+        soup = BeautifulSoup(html, 'html.parser')
+        # A) toggles con booking_id
+        elems = soup.find_all(attrs={'phx-value-booking_id': True}) \
+              + soup.find_all(attrs={'phx-value-booking-id': True})
+        if elems:
+            return len(elems)
+        # B) phx-click que contenga booking_details
+        elems = soup.find_all(attrs={'phx-click': re.compile(r'booking_details')}) \
+              + soup.find_all(attrs={'data-phx-click': re.compile(r'booking_details')})
+        if elems:
+            return len(elems)
+        # C) tablas
+        for table in soup.find_all('table'):
+            rows = table.find_all('tr')
             if len(rows) > 1:
-                hdr = rows[0].text.lower()
+                hdr = rows[0].get_text(" ").lower()
                 if any(k in hdr for k in ["dorsal","guía","guia","perro","nombre"]):
                     return max(0, len(rows)-1)
-                if 5 <= len(rows) <= 500:
+                if 5 <= len(rows) <= 2000:
                     return len(rows)-1
-    except Exception:
-        pass
-
-    # Fallback: número en texto
-    try:
-        txt = driver.find_element(By.TAG_NAME, "body").text.lower()
-        m = re.search(r"(\\d+)\\s*(participantes?|inscritos?|competidores?)", txt)
+        # D) número en texto
+        txt = soup.get_text(" ").lower()
+        m = re.search(r"(\d+)\s*(participantes?|inscritos?|competidores?)", txt)
         if m:
             n = int(m.group(1))
-            if 0 <= n <= 2000:
+            if 0 <= n <= 5000:
                 return n
     except Exception:
         pass
-
     return 0
 
 def extract_detailed_info():
@@ -638,9 +592,9 @@ def extract_detailed_info():
 
             try:
                 preserved = ['id', 'nombre', 'fechas', 'organizacion', 'club', 'lugar', 'enlaces', 'pais_bandera']
-                de = {k: event.get(k, '') for k in preserved}
-                de['numero_participantes'] = 0
-                de['participantes_info'] = 'No disponible'
+                detailed_event = {k: event.get(k, '') for k in preserved}
+                detailed_event['numero_participantes'] = 0
+                detailed_event['participantes_info'] = 'No disponible'
 
                 # ===== INFO DEL EVENTO (/info) =====
                 info_processed = False
@@ -654,22 +608,22 @@ def extract_detailed_info():
                         soup = BeautifulSoup(driver.page_source, 'html.parser')
 
                         extra = {}
-                        if not de.get('club') or de.get('club') in ['N/D', '']:
+                        if not detailed_event.get('club') or detailed_event.get('club') in ['N/D', '']:
                             club_elems = soup.find_all(lambda t: any(w in t.get_text().lower() for w in ['club','organizador','organizer']))
                             for el in club_elems:
                                 tx = _clean(el.get_text())
-                                if tx and len(tx) < 100: de['club'] = tx; break
-                        if not de.get('lugar') or de.get('lugar') in ['N/D', '']:
+                                if tx and len(tx) < 100: detailed_event['club'] = tx; break
+                        if not detailed_event.get('lugar') or detailed_event.get('lugar') in ['N/D', '']:
                             locs = soup.find_all(lambda t: any(w in t.get_text().lower() for w in ['lugar','ubicacion','location','place']))
                             for el in locs:
                                 tx = _clean(el.get_text())
                                 if tx and ('/' in tx or any(x in tx for x in ['Spain','España'])):
-                                    de['lugar'] = tx; break
+                                    detailed_event['lugar'] = tx; break
                         title = soup.find('h1')
                         if title: extra['titulo_completo'] = _clean(title.get_text())
                         desc = _extract_description(soup, max_length=800)
                         if desc: extra['descripcion'] = desc
-                        de['informacion_adicional'] = extra
+                        detailed_event['informacion_adicional'] = extra
                         info_processed = True
                     except Exception as e:
                         log(f"  ❌ Error procesando información: {e}")
@@ -685,47 +639,55 @@ def extract_detailed_info():
                     try:
                         driver.get(plist)
                         WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                        _accept_cookies(driver)  # <- acepta si vuelve a salir banner
 
                         # Estado determinista con tope corto
                         state = _wait_state_participants_page(driver, timeout_s=min(PER_PAGE_MAX_S, _time_left(event_deadline)))
 
-                        # Re-login 1 vez si caducó sesión
+                        # Re-login una vez si caducó sesión
                         if state == "login":
                             log("  ℹ️ Sesión caducada; reintentando login…")
                             if _login(driver):
                                 driver.get(plist)
                                 WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                                _accept_cookies(driver)
                                 state = _wait_state_participants_page(driver, timeout_s=min(PER_PAGE_MAX_S, _time_left(event_deadline)))
                             else:
                                 state = "timeout"
 
                         if state == "empty":
-                            de['numero_participantes'] = 0
-                            de['participantes_info'] = 'Sin participantes'
+                            detailed_event['numero_participantes'] = 0
+                            detailed_event['participantes_info'] = 'Sin participantes'
                             log("  ⚠️  Lista de participantes vacía (empty)")
+
                         elif state == "ok":
+                            # 1º JS vivo
                             n = _count_participants_fast(driver)
+                            # 2º Fallback HTML si JS da 0
+                            if n == 0:
+                                n = _count_participants_from_html(driver.page_source)
                             if n > 0:
-                                de['numero_participantes'] = n
-                                de['participantes_info'] = f"{n} participantes"
+                                detailed_event['numero_participantes'] = n
+                                detailed_event['participantes_info'] = f"{n} participantes"
                                 log(f"  ✅ Encontrados {n} participantes")
                             else:
-                                de['numero_participantes'] = 0
-                                de['participantes_info'] = 'Sin participantes'
-                                log("  ⚠️  No se encontraron participantes tras conteo rápido")
+                                detailed_event['numero_participantes'] = 0
+                                detailed_event['participantes_info'] = 'Sin participantes'
+                                log("  ⚠️  No se encontraron participantes tras conteos (JS/HTML)")
+
                         else:
-                            de['numero_participantes'] = 0
-                            de['participantes_info'] = 'Timeout esperando participantes'
+                            detailed_event['numero_participantes'] = 0
+                            detailed_event['participantes_info'] = 'Timeout esperando participantes'
                             log("  ⏱️  Timeout esperando lista; marco 0 y continúo")
 
                     except Exception as e:
                         log(f"  ❌ Error accediendo a participantes: {e}")
-                        de['numero_participantes'] = 0
-                        de['participantes_info'] = f"Error: {str(e)}"
+                        detailed_event['numero_participantes'] = 0
+                        detailed_event['participantes_info'] = f"Error: {str(e)}"
 
-                de['timestamp_extraccion'] = datetime.now().isoformat()
-                de['procesado_info'] = info_processed
-                detailed_events.append(de)
+                detailed_event['timestamp_extraccion'] = datetime.now().isoformat()
+                detailed_event['procesado_info'] = info_processed
+                detailed_events.append(detailed_event)
                 slow_pause(0.6, 1.4)
 
             except Exception as e:
