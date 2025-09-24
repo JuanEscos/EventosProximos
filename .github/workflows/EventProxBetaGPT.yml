@@ -116,7 +116,7 @@ jobs:
           FLOW_PASSRq: "${{ env.FLOW_PASSRq }}"
         run: |
           echo "=== EJECUTANDO SCRAPER ==="
-          python ./02EventosProxParticipantesGitHubGPT.py --module all
+          python ./EventosProxconParticipantes.py --module all
           echo "=== SCRAPER COMPLETADO ==="
 
       # ======= BLOQUE EXACTO QUE PEDISTE (verificación/compresión/FTP) =======
