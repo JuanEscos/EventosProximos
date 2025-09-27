@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
 """
+Created on Sat Sep 27 17:55:39 2025
+
+@author: Juan
+"""
+
+# -*- coding: utf-8 -*-
+"""
 Created on Fri Sep 19 18:21:04 2025
 
 @author: Juan
@@ -238,6 +245,9 @@ INCOGNITO = os.getenv("INCOGNITO", "true").lower() == "true"
 MAX_SCROLLS = int(os.getenv("MAX_SCROLLS", "15"))
 SCROLL_WAIT_S = float(os.getenv("SCROLL_WAIT_S", "3.0"))
 OUT_DIR = os.getenv("OUT_DIR", "./output")
+# Agregar después de las otras configuraciones
+MAX_EVENTS_FOR_TESTING = int(os.getenv("MAX_EVENTS_FOR_TESTING", "2"))
+
 
 print(f"📋 Configuración: HEADLESS={HEADLESS}, OUT_DIR={OUT_DIR}")
 
@@ -534,6 +544,7 @@ def extract_events():
         return None
     
     log("=== MÓDULO 1: EXTRACCIÓN DE EVENTOS BÁSICOS ===")
+    log("🔧 MODO PRUEBAS - SOLO 2 PRIMEROS EVENTOS")
     
     driver = _get_driver(headless=HEADLESS)
     if not driver:
@@ -570,9 +581,15 @@ def extract_events():
         event_containers = soup.find_all('div', class_='group mb-6')
         log(f"Encontrados {len(event_containers)} contenedores de eventos")
         
+        # 🔧 LIMITAR A SOLO 2 EVENTOS PARA PRUEBAS
+        MAX_EVENTS_FOR_TESTING = 2
+        event_containers = event_containers[:MAX_EVENTS_FOR_TESTING]
+        log(f"🔧 MODO PRUEBAS: Procesando solo {len(event_containers)} eventos")
+        
         events = []
         for i, container in enumerate(event_containers, 1):
             try:
+                # [El resto del código permanece igual...]
                 # Extraer información completa del evento
                 event_data = {}
                 
@@ -696,7 +713,6 @@ def extract_events():
             log("Navegador cerrado")
         except:
             pass
-
 # ============================== MÓDULO 2: INFORMACIÓN DETALLADA ==============================
 
 def _extract_description(soup, max_length=800):
@@ -912,6 +928,7 @@ def extract_detailed_info():
         return None
     
     log("=== MÓDULO 2: EXTRACCIÓN DE INFORMACIÓN DETALLADA ===")
+    log("🔧 MODO PRUEBAS - SOLO 2 PRIMEROS EVENTOS")
     
     # Buscar el archivo de eventos más reciente
     event_files = glob(os.path.join(OUT_DIR, "01events_*.json"))
@@ -927,6 +944,11 @@ def extract_detailed_info():
     
     log(f"✅ Cargados {len(events)} eventos desde {latest_event_file}")
     
+    # 🔧 LIMITAR A SOLO 2 EVENTOS PARA PRUEBAS
+    MAX_EVENTS_FOR_TESTING = 2
+    events = events[:MAX_EVENTS_FOR_TESTING]
+    log(f"🔧 MODO PRUEBAS: Procesando solo {len(events)} eventos")
+    
     driver = _get_driver(headless=HEADLESS)
     if not driver:
         log("❌ No se pudo crear el driver de Chrome")
@@ -940,6 +962,7 @@ def extract_detailed_info():
         
         for i, event in enumerate(events, 1):
             try:
+                # [El resto del código permanece igual...]
                 # PRESERVAR CAMPOS ORIGINALES IMPORTANTES
                 preserved_fields = ['id', 'nombre', 'fechas', 'organizacion', 'club', 'lugar', 'enlaces', 'pais_bandera']
                 detailed_event = {field: event.get(field, '') for field in preserved_fields}
@@ -1026,7 +1049,7 @@ def extract_detailed_info():
                         if num_participants > 0:
                             detailed_event['numero_participantes'] = num_participants
                             detailed_event['participantes_info'] = f"{num_participants} participantes"
-                            log(f"  ✅ Encontrados {num_participants} participantes")
+                            log(f"  ✅ Encontrados {num_participantes} participantes")
                         else:
                             detailed_event['numero_participantes'] = 0
                             detailed_event['participantes_info'] = 'Sin participantes'
@@ -1101,7 +1124,6 @@ def extract_detailed_info():
             driver.quit()
         except:
             pass
-
 # ============================== FUNCIÓN PRINCIPAL ==============================
 
 def main():
