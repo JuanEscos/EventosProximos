@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Created on Sat Sep 27 17:55:39 2025
-
+En Pruebas Sep 27
 @author: Juan
 """
 
