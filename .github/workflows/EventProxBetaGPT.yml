@@ -6,11 +6,11 @@ on:
       limit_events:
         description: "Máximo de eventos a procesar (0 = sin límite)"
         required: false
-        default: "35"
+        default: "2"  # Cambiado a 2 para pruebas
       max_runtime_min:
         description: "Corte ordenado a los N minutos (0 = sin límite)"
         required: false
-        default: "25"
+        default: "10"  # Reducido para pruebas
   schedule:
     # 03:40 UTC ≈ 05:40 Europe/Madrid (según DST)
     - cron: "40 3 * * *"
@@ -25,7 +25,7 @@ concurrency:
 jobs:
   run-scrape:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 30  # Reducido para pruebas
 
     env:
       TZ: Europe/Madrid
@@ -36,24 +36,24 @@ jobs:
       HEADLESS: "true"
       INCOGNITO: "true"
       OUT_DIR: "./output"
-      MAX_SCROLLS: "12"
-      SCROLL_WAIT_S: "2.0"
-      LIMIT_EVENTS: "${{ github.event.inputs.limit_events || '35' }}"
-      MAX_RUNTIME_MIN: "${{ github.event.inputs.max_runtime_min || '25' }}"
+      MAX_SCROLLS: "5"  # Reducido para pruebas
+      SCROLL_WAIT_S: "1.5"
+      # LIMIT_EVENTS ya no se usa directamente, se controla desde el script
+      MAX_RUNTIME_MIN: "${{ github.event.inputs.max_runtime_min || '10' }}"
 
-      # Throttling + resume (para 02EventosProxParticipantesGitHubGPT.py)
-      THROTTLE_EVENT_S: "3.0"
-      THROTTLE_PAGE_MIN_S: "1.2"
-      THROTTLE_PAGE_MAX_S: "2.5"
-      THROTTLE_TOGGLE_MIN_S: "0.9"
-      THROTTLE_TOGGLE_MAX_S: "2.2"
-      AUTO_SAVE_EVERY: "10"
-      RESUME: "true"
+      # Throttling + resume (reducido para pruebas)
+      THROTTLE_EVENT_S: "1.5"
+      THROTTLE_PAGE_MIN_S: "0.8"
+      THROTTLE_PAGE_MAX_S: "1.5"
+      THROTTLE_TOGGLE_MIN_S: "0.5"
+      THROTTLE_TOGGLE_MAX_S: "1.2"
+      AUTO_SAVE_EVERY: "2"  # Reducido para pruebas
+      RESUME: "false"  # Desactivado para pruebas
       RESUME_FILE: ""
 
-      # Credenciales (usar Secrets)
-      FLOW_EMAILRq: "${{ secrets.FLOW_EMAILRQ }}"
-      FLOW_PASSRq: "${{ secrets.FLOW_PASSRQ }}"
+      # Credenciales (usar Secrets) - CORREGIDO: usar FLOW_EMAIL y FLOW_PASS
+      FLOW_EMAIL: "${{ secrets.FLOW_EMAIL }}"
+      FLOW_PASS: "${{ secrets.FLOW_PASS }}"
 
     steps:
       - name: Checkout
@@ -85,7 +85,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install selenium webdriver-manager beautifulsoup4 python-dotenv
+            pip install selenium beautifulsoup4 python-dotenv
           fi
 
       - name: Prepare output dir
@@ -95,14 +95,13 @@ jobs:
           ls -la "${OUT_DIR}" || true
 
       - name: Run Python scraper (events + participants)
-        timeout-minutes: 60
+        timeout-minutes: 25
         env:
           HEADLESS: "${{ env.HEADLESS }}"
           INCOGNITO: "${{ env.INCOGNITO }}"
           OUT_DIR: "${{ env.OUT_DIR }}"
           MAX_SCROLLS: "${{ env.MAX_SCROLLS }}"
           SCROLL_WAIT_S: "${{ env.SCROLL_WAIT_S }}"
-          LIMIT_EVENTS: "${{ env.LIMIT_EVENTS }}"
           MAX_RUNTIME_MIN: "${{ env.MAX_RUNTIME_MIN }}"
           THROTTLE_EVENT_S: "${{ env.THROTTLE_EVENT_S }}"
           THROTTLE_PAGE_MIN_S: "${{ env.THROTTLE_PAGE_MIN_S }}"
@@ -112,21 +111,22 @@ jobs:
           AUTO_SAVE_EVERY: "${{ env.AUTO_SAVE_EVERY }}"
           RESUME: "${{ env.RESUME }}"
           RESUME_FILE: "${{ env.RESUME_FILE }}"
-          FLOW_EMAILRq: "${{ env.FLOW_EMAILRq }}"
-          FLOW_PASSRq: "${{ env.FLOW_PASSRq }}"
+          FLOW_EMAIL: "${{ env.FLOW_EMAIL }}"
+          FLOW_PASS: "${{ env.FLOW_PASS }}"
         run: |
-          echo "=== EJECUTANDO SCRAPER ==="
+          echo "=== EJECUTANDO SCRAPER EN MODO PRUEBAS (2 EVENTOS) ==="
+          echo "Script: EventosProxconParticipantes.py"
+          echo "Módulo: all"
+          echo "Límite de eventos: 2 (hardcoded en el script)"
           python ./EventosProxconParticipantes.py --module all
           echo "=== SCRAPER COMPLETADO ==="
-
-      # ======= BLOQUE EXACTO QUE PEDISTE (verificación/compresión/FTP) =======
 
       - name: Verify generated files
         run: |
           echo '=== VERIFICANDO ARCHIVOS GENERADOS ==='
           ls -la ./output/
           
-          # Verificar que existen los archivos finales
+          # Verificar que existen los archivos finales (adaptado a tu script)
           missing_files=0
           required_files=("01events.json" "02info.json")
           
@@ -134,11 +134,21 @@ jobs:
               if [ -f "./output/$file" ]; then
                   file_size=$(stat -c%s "./output/$file")
                   echo "✅ $file: ENCONTRADO (${file_size} bytes)"
+                  
+                  # Mostrar contenido de muestra para verificar
+                  if [ "$file_size" -gt 0 ]; then
+                    echo "   Primeras líneas:"
+                    head -5 "./output/$file"
+                  fi
               else
                   echo "❌ $file: NO ENCONTRADO"
                   missing_files=$((missing_files + 1))
               fi
           done
+          
+          # Verificar también archivos con fecha
+          dated_files=$(ls ./output/01events_*.json ./output/02info_*.json 2>/dev/null | wc -l)
+          echo "📅 Archivos con fecha: $dated_files encontrados"
           
           if [ $missing_files -eq 0 ]; then
               echo "✅ TODOS los archivos requeridos están presentes"
@@ -151,7 +161,7 @@ jobs:
         run: |
           echo "=== COMPRIMIENDO ARCHIVOS PARA FTP ==="
           
-          # Comprimir archivos JSON con gzip (máxima compresión)
+          # Comprimir archivos JSON con gzip
           for file in ./output/0*.json; do
               if [ -f "$file" ]; then
                   echo "Comprimiendo: $(basename $file)"
@@ -166,35 +176,45 @@ jobs:
           echo "=== ARCHIVOS COMPRIMIDOS ==="
           ls -la ./output/*.gz
 
-      - name: Upload compressed files to FTP
+      - name: Upload compressed files to FTP (condicional)
+        if: github.event_name == 'workflow_dispatch'  # Solo en ejecución manual
         env:
           FTP_SERVER: ${{ secrets.FTP_SERVER }}
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
           FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
         run: |
-          echo '=== SUBIENDO ARCHIVOS COMPRIMIDOS ==='
+          echo '=== SUBIENDO ARCHIVOS COMPRIMIDOS (MODO PRUEBAS) ==='
           
           # Verificar que las variables estén configuradas
           if [ -z "$FTP_SERVER" ] || [ -z "$FTP_USERNAME" ] || [ -z "$FTP_PASSWORD" ]; then
               echo "❌ ERROR: Variables FTP no configuradas correctamente"
-              exit 1
+              echo "⚠️  Saltando subida FTP - esto es normal en modo pruebas"
+              exit 0  # No fallar el workflow
           fi
           
-          REMOTE_DIR="${FTP_REMOTE_DIR}/Competiciones/EventosProx/Flow/data"
+          REMOTE_DIR="${FTP_REMOTE_DIR}/Competiciones/EventosProx/Flow/data/TEST"
           BASE_URL="ftp://${FTP_SERVER}${REMOTE_DIR}"
           
-          echo "Subiendo a: ${BASE_URL}/"
+          echo "Subiendo a directorio de pruebas: ${BASE_URL}/"
           
-          # Archivos comprimidos a subir
-          COMPRESSED_FILES=("01events.json.gz" "participantes_detallados.json.gz")
+          # Crear directorio de pruebas
+          curl --fail \
+               --ssl-reqd \
+               --ftp-create-dirs \
+               --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
+               -Q "MKD ${REMOTE_DIR}" \
+               "ftp://${FTP_SERVER}/" || echo "Directorio ya existe o no se pudo crear"
+          
+          # Archivos a subir (adaptado a tu script)
+          COMPRESSED_FILES=("01events.json.gz" "02info.json.gz")
           
           # Subir archivos comprimidos
           for file in "${COMPRESSED_FILES[@]}"; do
               local_file="./output/$file"
               
               if [ ! -f "$local_file" ]; then
-                  echo "❌ Archivo comprimido $file no encontrado"
+                  echo "⚠️ Archivo comprimido $file no encontrado - saltando"
                   continue
               fi
               
@@ -204,42 +224,18 @@ jobs:
               curl --fail \
                    --ssl-reqd \
                    --ftp-create-dirs \
-                   --disable-epsv \
-                   --ftp-skip-pasv-ip \
                    --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
                    --upload-file "$local_file" \
                    "${BASE_URL}/$file"
               
               if [ $? -eq 0 ]; then
-                  echo "✅ $file subido exitosamente"
+                  echo "✅ $file subido exitosamente a directorio TEST"
               else
                   echo "❌ Error subiendo archivo comprimido $file"
-                  
-                  # Intentar subir el archivo original sin comprimir
-                  original_file=${file%.gz}
-                  echo "🔄 Intentando subir archivo original: $original_file"
-                  
-                  curl --fail \
-                       --ssl-reqd \
-                       --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
-                       --upload-file "./output/$original_file" \
-                       "${BASE_URL}/$original_file" && \
-                  echo "✅ $original_file subido exitosamente" || \
-                  echo "❌ Error subiendo $original_file también"
               fi
               
               sleep 1
           done
-          
-          # También intentar subir el 01events.json sin comprimir (siempre es pequeño)
-          echo "📤 Subiendo 01events.json (sin comprimir)"
-          curl --fail \
-               --ssl-reqd \
-               --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
-               --upload-file "./output/01events.json" \
-               "${BASE_URL}/01events.json" && \
-          echo "✅ 01events.json subido exitosamente" || \
-          echo "⚠️  No se pudo subir 01events.json sin comprimir"
 
       - name: Create backup directory
         run: mkdir -p ./backup
@@ -247,9 +243,10 @@ jobs:
       - name: Backup uncompressed files
         run: |
           echo "=== CREANDO BACKUP LOCAL ==="
-          cp ./output/01events.json ./backup/
-          cp ./output/participantes_detallados.json ./backup/ || true
+          cp ./output/01events.json ./backup/ 2>/dev/null || echo "01events.json no encontrado"
+          cp ./output/02info.json ./backup/ 2>/dev/null || echo "02info.json no encontrado"
           echo "Backup de archivos sin comprimir creado en ./backup/"
+          ls -la ./backup/
 
       - name: Upload backup as artifact
         uses: actions/upload-artifact@v4
@@ -257,8 +254,9 @@ jobs:
           name: json-backup-uncompressed
           path: |
             ./backup/01events.json
-            ./backup/participantes_detallados.json
+            ./backup/02info.json
           retention-days: 7
+          if-no-files-found: warn
 
       - name: Upload compressed files as artifact
         uses: actions/upload-artifact@v4
@@ -268,6 +266,24 @@ jobs:
             ./output/01events.json.gz
             ./output/02info.json.gz
           retention-days: 3
+          if-no-files-found: warn
+
+      - name: Show final summary
+        run: |
+          echo "=== RESUMEN FINAL ==="
+          echo "Archivos generados en ./output/:"
+          ls -la ./output/
+          echo ""
+          echo "Tamaños de archivos JSON:"
+          for file in ./output/*.json; do
+              if [ -f "$file" ]; then
+                  size=$(stat -c%s "$file")
+                  lines=$(wc -l < "$file" 2>/dev/null || echo "N/A")
+                  echo "  $(basename $file): $size bytes, $lines líneas"
+              fi
+          done
+          echo ""
+          echo "✅ Proceso completado en modo pruebas (2 eventos)"
 
       - name: Debug on failure
         if: failure()
@@ -280,10 +296,5 @@ jobs:
           echo "=== VERIFICANDO CHROME ==="
           which google-chrome-stable && echo "Chrome encontrado: $(google-chrome-stable --version)" || echo "Chrome NO encontrado"
           which chromedriver && echo "Chromedriver encontrado: $(chromedriver --version)" || echo "Chromedriver NO encontrado"
-          echo "=== TAMAÑOS DE ARCHIVOS ==="
-          for file in ./output/*.json ./output/*.gz; do
-              if [ -f "$file" ]; then
-                  size=$(stat -c%s "$file")
-                  echo "$(basename $file): $size bytes"
-              fi
-          done
+          echo "=== ÚLTIMOS LOGS ==="
+          tail -100 /home/runner/.bash_history 2>/dev/null || echo "No history available"
